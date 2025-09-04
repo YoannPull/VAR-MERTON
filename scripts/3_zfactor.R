@@ -16,9 +16,10 @@ unregister_dopar <- function() {
 
 # --- Paramètres de modélisation ---
 P_VALUE_THRESHOLD      <- 0.05      # Seuil de significativité pour les variables
-NB_LAGS                <- 5         # Lags 0..NB_LAGS
-MAX_VARIABLES_IN_MODEL <- 5         # Nombre max de prédicteurs par modèle
-constraint_sign <- FALSE
+NB_LAGS                <- 4         # Lags 0..NB_LAGS
+MAX_VARIABLES_IN_MODEL <- 4         # Nombre max de prédicteurs par modèle
+constraint_sign        <- FALSE
+center_data            <- FALSE
 
 ################################################################################
 # ÉTAPE 1 : CALCUL DU FACTEUR DE RISQUE SYSTÉMIQUE Z
@@ -55,6 +56,15 @@ cat("--- Étape 2: Préparation des variables explicatives ---\n")
 data_macro_usa <- read.csv("data/processed/data_var_for_model.csv", header = TRUE)
 data_macro_usa$Date <- as.Date(data_macro_usa$Date)
 data_macro_usa$Date <- data_macro_usa$Date %m+% months(2)
+
+if (center_data){
+  setDT(data_macro_usa)
+  # Centrer toutes les colonnes numériques sauf Date
+  num_vars <- setdiff(names(data_macro_usa), "Date")
+  data_macro_usa[, (num_vars) := lapply(.SD, function(x) x - mean(x, na.rm = TRUE)), 
+                 .SDcols = num_vars]
+  setDF(data_macro_usa)
+}
 cat("Correction de l'alignement des dates macroéconomiques effectuée.\n")
 
 # Ensemble des variables macro testées
