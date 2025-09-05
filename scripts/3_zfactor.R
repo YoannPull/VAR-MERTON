@@ -7,7 +7,16 @@ if (!require("lubridate")) install.packages("lubridate")
 library(lubridate)
 if (!require("parallel")) install.packages("parallel")
 library(parallel)
-
+if (!require("data.table")) install.packages("data.table")
+library(data.table)
+if (!require("glmnet")) install.packages("glmnet")
+library(glmnet)
+if (!require("lmtest")) install.packages("lmtest")
+library(lmtest)
+if (!require("sandwich")) install.packages("sandwich")
+library(sandwich)
+if (!require("MASS")) install.packages("MASS")
+library(MASS)
 
 unregister_dopar <- function() {
   env <- foreach:::.foreachGlobals
@@ -20,6 +29,8 @@ NB_LAGS                <- 4         # Lags 0..NB_LAGS
 MAX_VARIABLES_IN_MODEL <- 4         # Nombre max de prédicteurs par modèle
 constraint_sign        <- FALSE
 center_data            <- FALSE
+
+set.seed(12345)
 
 ################################################################################
 # ÉTAPE 1 : CALCUL DU FACTEUR DE RISQUE SYSTÉMIQUE Z
@@ -61,15 +72,15 @@ if (center_data){
   setDT(data_macro_usa)
   # Centrer toutes les colonnes numériques sauf Date
   num_vars <- setdiff(names(data_macro_usa), "Date")
-  data_macro_usa[, (num_vars) := lapply(.SD, function(x) x - mean(x, na.rm = TRUE)), 
+  data_macro_usa[, (num_vars) := lapply(.SD, function(x) x - mean(x, na.rm = TRUE)),
                  .SDcols = num_vars]
   setDF(data_macro_usa)
 }
 cat("Correction de l'alignement des dates macroéconomiques effectuée.\n")
 
 # Ensemble des variables macro testées
-vars_to_lag <- c( "log_gdp_pc", "log_hours_pc", "log_sp500_real", "log_oil_real", "vix",
-                  "log_payems")
+vars_to_lag <- c("log_gdp_pc", "log_hours_pc", "log_sp500_real", "log_oil_real", "vix",
+                 "log_payems")
 
 lag_indices <- 0:NB_LAGS
 lagged_vars_list <- lapply(vars_to_lag, function(var_name) {
@@ -182,7 +193,7 @@ if (ci$kappa > 30)  cat("  Colinéarité forte (kappa > 30)\n")
 if (ci$kappa > 100) cat(" Colinéarité sévère (kappa > 100)\n")
 
 # Exports
-output_dir <- "scripts/outputs_USA_Z_Factor"  # défini aussi plus bas
+output_dir <- "scripts/outputs_USA_Z_Factor"
 dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 colld <- file.path(output_dir, "collinearity")
 dir.create(colld, showWarnings = FALSE, recursive = TRUE)
@@ -268,7 +279,7 @@ BATCH_SIZE <- max(2000, min(25000, ceiling(total_models / (num_cores * 6))))
 idx_all    <- seq_len(total_models)
 batches    <- split(idx_all, ceiling(idx_all / BATCH_SIZE))
 
-cat(sprintf("Traitement en %d batch(es) de ~%d modèles...\n", length(batches), 
+cat(sprintf("Traitement en %d batch(es) de ~%d modèles...\n", length(batches),
             BATCH_SIZE))
 flush.console()
 
@@ -301,7 +312,7 @@ for (b in seq_along(batches)) {
 
 cat("Calculs en parallèle terminés.\n")
 stopCluster(cl)
-unregister_dopar() 
+unregister_dopar()
 gc()  # forcer libération mémoire
 
 # Sélection du meilleur modèle par AIC
@@ -318,70 +329,15 @@ saveRDS(best_model, file = "scripts/model/best_model.rds")
 cat("Meilleur modèle sauvegardé dans 'best_model.rds'\n")
 
 ################################################################################
-# ÉTAPE 4 : GÉNÉRATION DES RÉSULTATS
-################################################################################
-cat("--- Étape 4: Écriture des résultats et du graphique ---\n")
-output_dir <- "scripts/outputs_USA_Z_Factor"
-dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-
-# Écriture du résumé texte
-summary_path <- file.path(output_dir, "model_summary.txt")
-sink(summary_path)
-cat("Résumé du Meilleur Modèle pour le Facteur Z (USA)\n\n")
-cat("Param lag =", NB_LAGS, " | MAX VARIABLES =", MAX_VARIABLES_IN_MODEL, "\n\n")
-cat("Variables testées :", paste(vars_to_lag, collapse = ", "), "\n\n")
-cat("Contrainte de signe :", constraint_sign, "\n\n")
-cat("NOTE: Le modèle est estimé sur l'ensemble de l'échantillon disponible.\n\n")
-cat("Critère de sélection : AIC le plus faible parmi les modèles valides.\n\n")
-cat("AIC du modèle sélectionné :", best_model_info$aic, "\n\n")
-print(summary(best_model))
-sink()
-cat(sprintf("Résumé du modèle sauvegardé dans '%s'.\n", summary_path))
-
-# Graphique d'ajustement
-plot_path <- file.path(output_dir, "model_fit_diagnostic.png")
-png(plot_path, width = 1000, height = 600)
-fitted_values <- predict(best_model, newdata = model_df)
-plot(model_df$Date, model_df$Y, type = "l", col = "grey50", lwd = 2,
-     ylab = "Valeur du Facteur Z", xlab = "Date",
-     main = "Ajustement du Modèle pour le Facteur Z (USA)",
-     sub  = paste("Modèle sélectionné par AIC =", round(best_model_info$aic, 3)))
-lines(model_df$Date, fitted_values, col = "darkgreen", lwd = 2)
-legend("topleft", bty = "n",
-       legend = c("Z Observé", "Ajustement du Modèle"),
-       col = c("grey50", "darkgreen"), lwd = 2, lty = 1)
-dev.off()
-cat(sprintf("Graphique d'ajustement sauvegardé dans '%s'.\n\n", plot_path))
-
-cat("--- Analyse terminée ! ---\n")
-
-
-
-
-
-################################################################################
 # ÉTAPE 3bis : Régressions régularisées (Ridge & Lasso) pour robustesse
 ################################################################################
 cat("--- Étape 3bis: Régressions Ridge & Lasso (robustesse) ---\n")
 
-# --- Packages ---
-if (!require("glmnet")) install.packages("glmnet")
-library(glmnet)
-
-# --- Switches (activez/désactivez) ---
-RUN_RIDGE <- TRUE
-RUN_LASSO <- TRUE
-USE_LAMBDA <- "lambda.1se"   # "lambda.min" ou "lambda.1se"
-
-set.seed(12345)
-
-# --- Données d'entrée (mêmes que le design précédemment construit) ---
-# On repart de model_df déjà créé plus haut
+# Données pour glmnet
 stopifnot(all(c("Date","Y") %in% names(model_df)))
 y_vec <- model_df$Y
 X_all <- as.matrix(model_df[, setdiff(names(model_df), c("Date","Y")), drop = FALSE])
 
-# Suppression variance nulle (réutilise la fonction définie plus haut)
 nzv2      <- drop_zero_variance(X_all)
 X_mat     <- nzv2$X
 kept_cols <- colnames(X_mat)
@@ -390,8 +346,7 @@ if (length(nzv2$dropped)) {
       paste(nzv2$dropped, collapse = ", "), "\n")
 }
 
-# --- Contraintes de signes (optionnel) ---
-# On mappe les contraintes de 'expected_signs' (définies plus haut) aux colonnes (avec lags)
+# Contraintes de signes (optionnel)
 build_limits <- function(col_names, expected_signs, use_constraints = FALSE) {
   p <- length(col_names)
   ll <- rep(-Inf, p); ul <- rep(Inf, p)
@@ -409,20 +364,19 @@ build_limits <- function(col_names, expected_signs, use_constraints = FALSE) {
 }
 lims <- build_limits(kept_cols, expected_signs, constraint_sign)
 
-# --- Cross-validation par blocs temporels (respect de l'ordre) ---
+# CV par blocs temporels
 make_blocked_foldid <- function(n, K = 5) {
-  K <- max(3, min(K, n))  # sécurité
+  K <- max(3, min(K, n))
   rep(rep(1:K, each = ceiling(n / K)), length.out = n)
 }
 K_FOLDS <- 5
 foldid  <- make_blocked_foldid(nrow(X_mat), K = K_FOLDS)
 
-# --- Répertoire de sortie ---
-output_dir <- "scripts/outputs_USA_Z_Factor"
+# Répertoire
 reg_dir    <- file.path(output_dir, "regularization")
 dir.create(reg_dir, showWarnings = FALSE, recursive = TRUE)
 
-# --- Helpers de sortie ---
+# Helpers
 write_nonzero_coefs <- function(fit_cv, which_lambda, xnames, path_csv) {
   cf <- as.matrix(coef(fit_cv, s = which_lambda))
   out <- data.frame(variable = rownames(cf), coef = as.numeric(cf[,1]), row.names = NULL)
@@ -440,12 +394,15 @@ compute_fit_stats <- function(y, yhat, df, name) {
   bic <- n * log(mse) + log(n) * df
   data.frame(model = name, n = n, df = df, RMSE = rmse, MSE = mse, RSS = rss, AIC = aic, BIC = bic)
 }
+take_lambda <- function(cvfit, use) if (use == "lambda.min") cvfit$lambda.min else cvfit$lambda.1se
+idx_for_lambda <- function(cvfit, lam) which.min(abs(cvfit$lambda - lam))
 
 metrics_list <- list()
+RUN_RIDGE <- TRUE
+RUN_LASSO <- TRUE
+USE_LAMBDA <- "lambda.1se"   # "lambda.min" ou "lambda.1se"
 
-# =========================
-# RIDGE (alpha = 0)
-# =========================
+# ===== RIDGE =====
 if (RUN_RIDGE) {
   cat("• Estimation RIDGE (alpha=0)...\n")
   cv_ridge <- cv.glmnet(
@@ -456,22 +413,19 @@ if (RUN_RIDGE) {
   )
   saveRDS(cv_ridge, file = file.path(reg_dir, "ridge_cvglmnet.rds"))
   
-  # Plot CV
   png(file.path(reg_dir, "ridge_cv_curve.png"), width = 1000, height = 600)
   plot(cv_ridge); title("Ridge CV (MSE)")
   dev.off()
   
-  # Coefficients
   ridge_coefs <- write_nonzero_coefs(cv_ridge, USE_LAMBDA, kept_cols,
                                      file.path(reg_dir, paste0("ridge_coefs_", USE_LAMBDA, ".csv")))
   
-  # Ajustement in-sample
   yhat_ridge <- as.numeric(predict(cv_ridge, newx = X_mat, s = USE_LAMBDA))
-  df_ridge   <- cv_ridge$glmnet.fit$df[which(cv_ridge$glmnet.fit$lambda == get(USE_LAMBDA, cv_ridge))]
-  if (length(df_ridge) == 0) df_ridge <- cv_ridge$glmnet.fit$df[which.min(abs(cv_ridge$glmnet.fit$lambda - get(USE_LAMBDA, cv_ridge)))]
+  lam_r <- take_lambda(cv_ridge, USE_LAMBDA)
+  idx_r <- idx_for_lambda(cv_ridge, lam_r)
+  df_ridge <- cv_ridge$glmnet.fit$df[idx_r]
   metrics_list[["ridge"]] <- compute_fit_stats(y_vec, yhat_ridge, df = df_ridge, name = paste0("RIDGE_", USE_LAMBDA))
   
-  # Plot fit
   png(file.path(reg_dir, paste0("ridge_fit_", USE_LAMBDA, ".png")), width = 1000, height = 600)
   plot(model_df$Date, y_vec, type = "l", lwd = 2, col = "grey50",
        ylab = "Valeur du Facteur Z", xlab = "Date",
@@ -482,9 +436,7 @@ if (RUN_RIDGE) {
   dev.off()
 }
 
-# =========================
-# LASSO (alpha = 1)
-# =========================
+# ===== LASSO =====
 if (RUN_LASSO) {
   cat("• Estimation LASSO (alpha=1)...\n")
   cv_lasso <- cv.glmnet(
@@ -495,22 +447,19 @@ if (RUN_LASSO) {
   )
   saveRDS(cv_lasso, file = file.path(reg_dir, "lasso_cvglmnet.rds"))
   
-  # Plot CV
   png(file.path(reg_dir, "lasso_cv_curve.png"), width = 1000, height = 600)
   plot(cv_lasso); title("Lasso CV (MSE)")
   dev.off()
   
-  # Coefficients
   lasso_coefs <- write_nonzero_coefs(cv_lasso, USE_LAMBDA, kept_cols,
                                      file.path(reg_dir, paste0("lasso_coefs_", USE_LAMBDA, ".csv")))
   
-  # Ajustement in-sample
   yhat_lasso <- as.numeric(predict(cv_lasso, newx = X_mat, s = USE_LAMBDA))
-  df_lasso   <- cv_lasso$glmnet.fit$df[which(cv_lasso$glmnet.fit$lambda == get(USE_LAMBDA, cv_lasso))]
-  if (length(df_lasso) == 0) df_lasso <- cv_lasso$glmnet.fit$df[which.min(abs(cv_lasso$glmnet.fit$lambda - get(USE_LAMBDA, cv_lasso)))]
+  lam_l <- take_lambda(cv_lasso, USE_LAMBDA)
+  idx_l <- idx_for_lambda(cv_lasso, lam_l)
+  df_lasso <- cv_lasso$glmnet.fit$df[idx_l]
   metrics_list[["lasso"]] <- compute_fit_stats(y_vec, yhat_lasso, df = df_lasso, name = paste0("LASSO_", USE_LAMBDA))
   
-  # Plot fit
   png(file.path(reg_dir, paste0("lasso_fit_", USE_LAMBDA, ".png")), width = 1000, height = 600)
   plot(model_df$Date, y_vec, type = "l", lwd = 2, col = "grey50",
        ylab = "Valeur du Facteur Z", xlab = "Date",
@@ -527,22 +476,12 @@ if (length(metrics_list)) {
   write.csv(metrics, file.path(reg_dir, "regularization_metrics.csv"), row.names = FALSE)
   print(metrics)
 }
-
 cat("Sorties ridge/lasso écrites dans 'scripts/outputs_USA_Z_Factor/regularization/'.\n\n")
-
-
 
 ################################################################################
 # ÉTAPE 3ter : Résumé texte des résultats Ridge/Lasso
 ################################################################################
 cat("--- Étape 3ter: Rédaction d'un résumé texte (regularization_summary.txt) ---\n")
-
-# Sécurité : s'il n'existe pas, reg_dir a été défini plus haut
-if (!exists("reg_dir")) {
-  output_dir <- "scripts/outputs_USA_Z_Factor"
-  reg_dir    <- file.path(output_dir, "regularization")
-  dir.create(reg_dir, showWarnings = FALSE, recursive = TRUE)
-}
 
 # Helpers
 idx_for_lambda <- function(cvfit, lam) which.min(abs(cvfit$lambda - lam))
@@ -553,6 +492,20 @@ nonzero_df <- function(cvfit, s_label){
   df <- subset(df, variable != "(Intercept)")
   df$nonzero <- df$coef != 0
   df[df$nonzero, c("variable","coef")]
+}
+print_top <- function(df, top_n = 20) {
+  if (is.null(df) || !nrow(df)) { wln("  (aucun)"); return(invisible(NULL)) }
+  df2 <- df[order(-abs(df$coef)), , drop = FALSE]
+  df2 <- head(df2, top_n)
+  for (i in seq_len(nrow(df2))) {
+    v <- as.character(df2$variable[i])
+    cval <- suppressWarnings(as.numeric(df2$coef[i]))
+    if (is.na(cval)) {
+      wln("  ", sprintf("%-28s", v), " = NA")
+    } else {
+      wln("  ", sprintf("%-28s", v), " = ", sprintf("% .6f", cval))
+    }
+  }
 }
 
 # Prépare le fichier
@@ -587,36 +540,25 @@ if (exists("best_model")) {
   wln("Variables OLS : ", paste(ols_vars, collapse = ", "), "")
 }
 
-# Résumé RIDGE
+# Résumé RIDGE @ lambda.1se
 if (exists("RUN_RIDGE") && RUN_RIDGE && exists("cv_ridge")) {
-  lam_ridge <- take_lambda(cv_ridge, USE_LAMBDA)
+  lam_ridge <- take_lambda(cv_ridge, "lambda.1se")
   idx_r     <- idx_for_lambda(cv_ridge, lam_ridge)
-  yhat_r    <- as.numeric(predict(cv_ridge, newx = X_mat, s = USE_LAMBDA))
+  yhat_r    <- as.numeric(predict(cv_ridge, newx = X_mat, s = "lambda.1se"))
   rmse_r    <- sqrt(mean((y_vec - yhat_r)^2))
-  cor_r     <- suppressWarnings(cor(y_vec, yhat_r))
-  df_r      <- cv_ridge$glmnet.fit$df[idx_r]  # nb de coef non nuls (glmnet)
+  cor_r     <- if (sd(yhat_r) > 0) suppressWarnings(cor(y_vec, yhat_r)) else NA
+  df_r      <- cv_ridge$glmnet.fit$df[idx_r]
   cv_mse_r  <- cv_ridge$cvm[idx_r]
   cv_sd_r   <- cv_ridge$cvsd[idx_r]
+  nz_r      <- nonzero_df(cv_ridge, "lambda.1se")
   
-  nz_r      <- nonzero_df(cv_ridge, USE_LAMBDA)
-  nz_r      <- nz_r[order(-abs(nz_r$coef)), , drop = FALSE]
-  
-  wln("=== RIDGE (alpha = 0) — ", USE_LAMBDA, " ===")
+  wln("=== RIDGE (alpha = 0) — lambda.1se ===")
   wln("lambda = ", sprintf("%.6f", lam_ridge),
       " | df (glmnet) = ", df_r,
       " | CV-MSE = ", sprintf("%.6f", cv_mse_r), " ± ", sprintf("%.6f", cv_sd_r),
       " | RMSE (in-sample) = ", sprintf("%.5f", rmse_r),
-      " | corr(Y, Ŷ) = ", sprintf("%.4f", cor_r))
-  wln("Top coefficients (|coef| décroissant) :")
-  if (nrow(nz_r)) {
-    topk <- head(nz_r, 20)
-    apply(topk, 1, function(row) wln("  ", sprintf("%-28s", row[["variable"]]), " = ", sprintf("% .6f", row[["coef"]])))
-  } else {
-    wln("  (Ridge donne souvent tous les coefficients non nuls ; cf. CSV détaillé.)")
-  }
-  wln("")
-  
-  # Overlap OLS si dispo
+      " | corr(Y, Ŷ) = ", ifelse(is.na(cor_r), "NA", sprintf("%.4f", cor_r)))
+  wln("Top coefficients (|coef| décroissant) :"); print_top(nz_r, top_n = 20); wln("")
   if (exists("best_model")) {
     ols_vars <- setdiff(names(coef(best_model)), "(Intercept)")
     inter_r  <- intersect(ols_vars, nz_r$variable)
@@ -624,41 +566,93 @@ if (exists("RUN_RIDGE") && RUN_RIDGE && exists("cv_ridge")) {
   }
 }
 
-# Résumé LASSO
+# Résumé LASSO @ lambda.1se
 if (exists("RUN_LASSO") && RUN_LASSO && exists("cv_lasso")) {
-  lam_lasso <- take_lambda(cv_lasso, USE_LAMBDA)
+  lam_lasso <- take_lambda(cv_lasso, "lambda.1se")
   idx_l     <- idx_for_lambda(cv_lasso, lam_lasso)
-  yhat_l    <- as.numeric(predict(cv_lasso, newx = X_mat, s = USE_LAMBDA))
+  yhat_l    <- as.numeric(predict(cv_lasso, newx = X_mat, s = "lambda.1se"))
   rmse_l    <- sqrt(mean((y_vec - yhat_l)^2))
-  cor_l     <- suppressWarnings(cor(y_vec, yhat_l))
-  df_l      <- cv_lasso$glmnet.fit$df[idx_l]  # nb de coef non nuls (lasso)
+  cor_l     <- if (sd(yhat_l) > 0) suppressWarnings(cor(y_vec, yhat_l)) else NA
+  df_l      <- cv_lasso$glmnet.fit$df[idx_l]
   cv_mse_l  <- cv_lasso$cvm[idx_l]
   cv_sd_l   <- cv_lasso$cvsd[idx_l]
+  nz_l      <- nonzero_df(cv_lasso, "lambda.1se")
   
-  nz_l      <- nonzero_df(cv_lasso, USE_LAMBDA)
-  nz_l      <- nz_l[order(-abs(nz_l$coef)), , drop = FALSE]
-  
-  wln("=== LASSO (alpha = 1) — ", USE_LAMBDA, " ===")
+  wln("=== LASSO (alpha = 1) — lambda.1se ===")
   wln("lambda = ", sprintf("%.6f", lam_lasso),
       " | df (glmnet) = ", df_l,
       " | CV-MSE = ", sprintf("%.6f", cv_mse_l), " ± ", sprintf("%.6f", cv_sd_l),
       " | RMSE (in-sample) = ", sprintf("%.5f", rmse_l),
-      " | corr(Y, Ŷ) = ", sprintf("%.4f", cor_l))
-  wln("Coefficients non nuls (|coef| décroissant) :")
-  if (nrow(nz_l)) {
-    topk <- head(nz_l, 30)
-    apply(topk, 1, function(row) wln("  ", sprintf("%-28s", row[["variable"]]), " = ", sprintf("% .6f", row[["coef"]])))
-  } else {
-    wln("  (Aucun coefficient non nul à ce lambda.)")
-  }
-  wln("")
-  
-  # Overlap OLS si dispo
+      " | corr(Y, Ŷ) = ", ifelse(is.na(cor_l), "NA", sprintf("%.4f", cor_l)))
+  wln("Coefficients non nuls (|coef| décroissant) :"); print_top(nz_l, top_n = 30); wln("")
   if (exists("best_model")) {
     ols_vars <- setdiff(names(coef(best_model)), "(Intercept)")
     inter_l  <- intersect(ols_vars, nz_l$variable)
     wln("Chevauchement avec OLS (variables) : ", if (length(inter_l)) paste(inter_l, collapse = ", ") else "(aucune)", "")
   }
+}
+
+# --- RIDGE @ lambda.min ---
+if (exists("cv_ridge")) {
+  lam_r_min <- cv_ridge$lambda.min
+  yhat_r_min <- as.numeric(predict(cv_ridge, newx = X_mat, s = "lambda.min"))
+  rmse_r_min <- sqrt(mean((y_vec - yhat_r_min)^2))
+  cor_r_min  <- if (sd(yhat_r_min) > 0) cor(y_vec, yhat_r_min) else NA
+  idx_r_min  <- which.min(abs(cv_ridge$lambda - lam_r_min))
+  df_r_min   <- cv_ridge$glmnet.fit$df[idx_r_min]
+  cv_mse_r_min <- cv_ridge$cvm[idx_r_min]; cv_sd_r_min <- cv_ridge$cvsd[idx_r_min]
+  
+  wln("=== RIDGE (alpha = 0) — lambda.min ===")
+  wln("lambda = ", sprintf("%.6f", lam_r_min),
+      " | df = ", df_r_min,
+      " | CV-MSE = ", sprintf("%.6f", cv_mse_r_min), " ± ", sprintf("%.6f", cv_sd_r_min),
+      " | RMSE (in-sample) = ", sprintf("%.5f", rmse_r_min),
+      " | corr(Y, Ŷ) = ", ifelse(is.na(cor_r_min), "NA", sprintf("%.4f", cor_r_min)))
+  wln("")
+}
+
+# --- LASSO @ lambda.min ---
+if (exists("cv_lasso")) {
+  lam_l_min <- cv_lasso$lambda.min
+  yhat_l_min <- as.numeric(predict(cv_lasso, newx = X_mat, s = "lambda.min"))
+  rmse_l_min <- sqrt(mean((y_vec - yhat_l_min)^2))
+  cor_l_min  <- if (sd(yhat_l_min) > 0) cor(y_vec, yhat_l_min) else NA
+  idx_l_min  <- which.min(abs(cv_lasso$lambda - lam_l_min))
+  df_l_min   <- cv_lasso$glmnet.fit$df[idx_l_min]
+  cv_mse_l_min <- cv_lasso$cvm[idx_l_min]; cv_sd_l_min <- cv_lasso$cvsd[idx_l_min]
+  
+  wln("=== LASSO (alpha = 1) — lambda.min ===")
+  wln("lambda = ", sprintf("%.6f", lam_l_min),
+      " | df = ", df_l_min,
+      " | CV-MSE = ", sprintf("%.6f", cv_mse_l_min), " ± ", sprintf("%.6f", cv_sd_l_min),
+      " | RMSE (in-sample) = ", sprintf("%.5f", rmse_l_min),
+      " | corr(Y, Ŷ) = ", ifelse(is.na(cor_l_min), "NA", sprintf("%.4f", cor_l_min)))
+  wln("")
+}
+
+# --- OLS en CV sur les mêmes folds ---
+if (exists("best_model")) {
+  # Si foldid/X_mat n'existent pas, on les reconstruit
+  if (!exists("foldid")) foldid <- make_blocked_foldid(nrow(model_df), 5)
+  uniq_folds <- sort(unique(foldid))
+  ols_form <- formula(best_model)
+  cv_mses <- numeric(length(uniq_folds))
+  for (ii in seq_along(uniq_folds)) {
+    k <- uniq_folds[ii]
+    test_idx  <- which(foldid == k)
+    train_idx <- setdiff(seq_len(nrow(model_df)), test_idx)
+    fit_k <- try(lm(ols_form, data = model_df[train_idx, ]), silent = TRUE)
+    if (inherits(fit_k, "try-error")) { cv_mses[ii] <- NA; next }
+    pred_k <- predict(fit_k, newdata = model_df[test_idx, ])
+    cv_mses[ii] <- mean((model_df$Y[test_idx] - pred_k)^2)
+  }
+  ols_cv_mse <- mean(cv_mses, na.rm = TRUE)
+  ols_cv_sd  <- sd(cv_mses, na.rm = TRUE)
+  
+  wln("=== OLS — CV (mêmes folds que glmnet) ===")
+  wln("CV-MSE = ", sprintf("%.6f", ols_cv_mse), " ± ", sprintf("%.6f", ols_cv_sd))
+  wln("Note: cette CV peut inclure du 'futur' dans l'entraînement ; préférer un rolling-origin pour du time-safe.")
+  wln("")
 }
 
 wln("Notes d'interprétation :")
@@ -668,3 +662,99 @@ wln("- Les coefficients glmnet sont reportés sur l'échelle originale des varia
 wln("- Pour une décision finale, compare aussi les performances hors-échantillon (ex. rolling window/expanding).")
 
 cat(sprintf("Résumé texte sauvegardé dans '%s'.\n\n", txt_path))
+
+################################################################################
+# ÉTAPE 4 : GÉNÉRATION DES RÉSULTATS OLS (texte et graphique)
+################################################################################
+cat("--- Étape 4: Écriture des résultats et du graphique OLS ---\n")
+output_dir <- "scripts/outputs_USA_Z_Factor"
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Écriture du résumé texte OLS
+summary_path <- file.path(output_dir, "model_summary.txt")
+sink(summary_path)
+cat("Résumé du Meilleur Modèle pour le Facteur Z (USA)\n\n")
+cat("Param lag =", NB_LAGS, " | MAX VARIABLES =", MAX_VARIABLES_IN_MODEL, "\n\n")
+cat("Variables testées :", paste(vars_to_lag, collapse = ", "), "\n\n")
+cat("Contrainte de signe :", constraint_sign, "\n\n")
+cat("NOTE: Le modèle est estimé sur l'ensemble de l'échantillon disponible.\n\n")
+cat("Critère de sélection : AIC le plus faible parmi les modèles valides.\n\n")
+cat("AIC du modèle sélectionné :", best_model_info$aic, "\n\n")
+print(summary(best_model))
+sink()
+cat(sprintf("Résumé du modèle sauvegardé dans '%s'.\n", summary_path))
+
+# Graphique d'ajustement OLS
+plot_path <- file.path(output_dir, "model_fit_diagnostic.png")
+png(plot_path, width = 1000, height = 600)
+fitted_values <- predict(best_model, newdata = model_df)
+plot(model_df$Date, model_df$Y, type = "l", col = "grey50", lwd = 2,
+     ylab = "Valeur du Facteur Z", xlab = "Date",
+     main = "Ajustement du Modèle pour le Facteur Z (USA)",
+     sub  = paste("Modèle sélectionné par AIC =", round(best_model_info$aic, 3)))
+lines(model_df$Date, fitted_values, col = "darkgreen", lwd = 2)
+legend("topleft", bty = "n",
+       legend = c("Z Observé", "Ajustement du Modèle"),
+       col = c("grey50", "darkgreen"), lwd = 2, lty = 1)
+dev.off()
+cat(sprintf("Graphique d'ajustement sauvegardé dans '%s'.\n\n", plot_path))
+
+################################################################################
+# ÉTAPE 5 : ROBUSTESSES ADDITIONNELLES (HAC/HC3, Rolling OOS, Model averaging, Influence)
+################################################################################
+cat("--- Étape 5: Robustesses additionnelles ---\n")
+
+# (A) SE robustes (HAC + HC3)
+hac <- coeftest(best_model, vcov = NeweyWest(best_model, lag = NB_LAGS, prewhite = TRUE, adjust = TRUE))
+hc3 <- coeftest(best_model, vcov = vcovHC(best_model, type = "HC3"))
+write.table(capture.output(hac),  file.path(output_dir, "hac_newey_west.txt"),
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+write.table(capture.output(hc3),  file.path(output_dir, "hc3_robust_se.txt"),
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+cat("SE robustes HAC/HC3 exportées.\n")
+
+# (B) Rolling-origin OOS (expanding)
+rolling_oos <- function(df, form, initial, h = 1, step = 1) {
+  n <- nrow(df); preds <- rep(NA_real_, n)
+  for (t in seq(initial, n - h, by = step)) {
+    fit <- lm(form, data = df[1:t, ])
+    preds[t + h] <- predict(fit, newdata = df[t + h, , drop = FALSE])
+  }
+  ok <- !is.na(preds)
+  rmse <- sqrt(mean((df$Y[ok] - preds[ok])^2))
+  mae  <- mean(abs(df$Y[ok] - preds[ok]))
+  list(rmse = rmse, mae = mae, preds = preds)
+}
+oos <- rolling_oos(model_df, formula(best_model), initial = max(24, ceiling(nrow(model_df)/2)), h = 1)
+cat(sprintf("Rolling OOS (h=1) — RMSE=%.4f | MAE=%.4f\n", oos$rmse, oos$mae))
+write.csv(data.frame(Date=model_df$Date, Y=model_df$Y, Yhat=oos$preds),
+          file.path(output_dir, "rolling_oos_predictions.csv"), row.names = FALSE)
+
+# (C) Model averaging & fréquences d’inclusion
+vm <- Filter(Negate(is.null), results)
+if (length(vm) > 0) {
+  tbl <- do.call(rbind, lapply(vm, function(x) data.frame(aic = x$aic, model = paste(x$vars, collapse = " + "))))
+  tbl$delta <- tbl$aic - min(tbl$aic)
+  tbl$wAIC  <- exp(-0.5 * tbl$delta); tbl$wAIC <- tbl$wAIC / sum(tbl$wAIC)
+  vars <- sort(unique(unlist(lapply(vm, `[[`, "vars"))))
+  incl <- sapply(vars, function(v) sum(sapply(vm, function(x) v %in% x$vars)))
+  incl_w <- sapply(vars, function(v) sum(sapply(seq_along(vm), function(i) (v %in% vm[[i]]$vars) * tbl$wAIC[i])))
+  incl_df <- data.frame(variable = vars, freq = incl/length(vm), weight = incl_w)
+  write.csv(tbl[order(-tbl$wAIC), ], file.path(output_dir, "akaike_weights.csv"), row.names = FALSE)
+  write.csv(incl_df[order(-incl_df$weight), ], file.path(output_dir, "variable_inclusion.csv"), row.names = FALSE)
+  cat("Model averaging (poids AIC) exporté.\n")
+} else {
+  cat("Aucun modèle valide pour le model averaging.\n")
+}
+
+# (D) Robustesse à l’influence / outliers
+inf <- influence.measures(best_model)
+infl_idx <- which(apply(inf$is.inf, 1, any))
+write.csv(data.frame(obs = infl_idx), file.path(output_dir, "influential_points.csv"), row.names = FALSE)
+
+fit_rlm <- rlm(formula(best_model), data = model_df, psi = psi.huber)
+write.table(capture.output(summary(fit_rlm)),
+            file.path(output_dir, "robust_rlm_summary.txt"), row.names = FALSE, col.names = FALSE, quote = FALSE)
+cat("Diagnostics d'influence et régression robuste exportés.\n")
+
+cat("--- Analyse terminée ! ---\n")
