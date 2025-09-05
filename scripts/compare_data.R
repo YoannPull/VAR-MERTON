@@ -28,14 +28,14 @@ dt <- clean_numeric_columns(dt)
 
 data_macro <- fread("data/processed/data_var_for_model.csv")
 
-data_macro <- data_macro[,.(Date_quarter,GPRD_ACT)]
-data_macro <- merge(data_macro,dt[,.(C_Date_quarter,C_GPRD_ACT)],
-                  by.x = "Date_quarter", by.y = "C_Date_quarter")
+data_macro <- data_macro[,.(Date_quarter,GPRD)]
+data_macro <- merge(data_macro,dt[,.(Date_quarter,C_GPRD)],
+                  by.x = "Date_quarter", by.y = "Date_quarter")
 
 data_macro_long <- melt(
   data_macro,
   id.vars = "Date_quarter",
-  measure.vars = c("GPRD_ACT","C_GPRD_ACT"),
+  measure.vars = c("GPRD","C_GPRD"),
   variable.name = "Type",
   value.name = "VAR"
 )

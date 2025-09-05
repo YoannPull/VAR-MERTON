@@ -354,3 +354,317 @@ dev.off()
 cat(sprintf("Graphique d'ajustement sauvegardé dans '%s'.\n\n", plot_path))
 
 cat("--- Analyse terminée ! ---\n")
+
+
+
+
+
+################################################################################
+# ÉTAPE 3bis : Régressions régularisées (Ridge & Lasso) pour robustesse
+################################################################################
+cat("--- Étape 3bis: Régressions Ridge & Lasso (robustesse) ---\n")
+
+# --- Packages ---
+if (!require("glmnet")) install.packages("glmnet")
+library(glmnet)
+
+# --- Switches (activez/désactivez) ---
+RUN_RIDGE <- TRUE
+RUN_LASSO <- TRUE
+USE_LAMBDA <- "lambda.1se"   # "lambda.min" ou "lambda.1se"
+
+set.seed(12345)
+
+# --- Données d'entrée (mêmes que le design précédemment construit) ---
+# On repart de model_df déjà créé plus haut
+stopifnot(all(c("Date","Y") %in% names(model_df)))
+y_vec <- model_df$Y
+X_all <- as.matrix(model_df[, setdiff(names(model_df), c("Date","Y")), drop = FALSE])
+
+# Suppression variance nulle (réutilise la fonction définie plus haut)
+nzv2      <- drop_zero_variance(X_all)
+X_mat     <- nzv2$X
+kept_cols <- colnames(X_mat)
+if (length(nzv2$dropped)) {
+  cat("Ridge/Lasso - colonnes à variance nulle supprimées :",
+      paste(nzv2$dropped, collapse = ", "), "\n")
+}
+
+# --- Contraintes de signes (optionnel) ---
+# On mappe les contraintes de 'expected_signs' (définies plus haut) aux colonnes (avec lags)
+build_limits <- function(col_names, expected_signs, use_constraints = FALSE) {
+  p <- length(col_names)
+  ll <- rep(-Inf, p); ul <- rep(Inf, p)
+  if (!use_constraints || is.null(expected_signs)) return(list(ll = ll, ul = ul))
+  base_of <- function(nm) sub("_lag[0-9]+$", "", nm)
+  for (j in seq_len(p)) {
+    base <- base_of(col_names[j])
+    want <- expected_signs[[base]]
+    if (!is.null(want) && want != 0) {
+      if (want ==  1) ll[j] <- 0   # coefficient >= 0
+      if (want == -1) ul[j] <- 0   # coefficient <= 0
+    }
+  }
+  list(ll = ll, ul = ul)
+}
+lims <- build_limits(kept_cols, expected_signs, constraint_sign)
+
+# --- Cross-validation par blocs temporels (respect de l'ordre) ---
+make_blocked_foldid <- function(n, K = 5) {
+  K <- max(3, min(K, n))  # sécurité
+  rep(rep(1:K, each = ceiling(n / K)), length.out = n)
+}
+K_FOLDS <- 5
+foldid  <- make_blocked_foldid(nrow(X_mat), K = K_FOLDS)
+
+# --- Répertoire de sortie ---
+output_dir <- "scripts/outputs_USA_Z_Factor"
+reg_dir    <- file.path(output_dir, "regularization")
+dir.create(reg_dir, showWarnings = FALSE, recursive = TRUE)
+
+# --- Helpers de sortie ---
+write_nonzero_coefs <- function(fit_cv, which_lambda, xnames, path_csv) {
+  cf <- as.matrix(coef(fit_cv, s = which_lambda))
+  out <- data.frame(variable = rownames(cf), coef = as.numeric(cf[,1]), row.names = NULL)
+  out$nonzero <- out$coef != 0
+  out <- out[order(-abs(out$coef)), ]
+  write.csv(out, path_csv, row.names = FALSE)
+  invisible(out)
+}
+compute_fit_stats <- function(y, yhat, df, name) {
+  n   <- length(y)
+  rss <- sum((y - yhat)^2)
+  mse <- rss / n
+  rmse <- sqrt(mse)
+  aic <- n * log(mse) + 2 * df
+  bic <- n * log(mse) + log(n) * df
+  data.frame(model = name, n = n, df = df, RMSE = rmse, MSE = mse, RSS = rss, AIC = aic, BIC = bic)
+}
+
+metrics_list <- list()
+
+# =========================
+# RIDGE (alpha = 0)
+# =========================
+if (RUN_RIDGE) {
+  cat("• Estimation RIDGE (alpha=0)...\n")
+  cv_ridge <- cv.glmnet(
+    x = X_mat, y = y_vec, family = "gaussian", alpha = 0,
+    standardize = TRUE, foldid = foldid,
+    lower.limits = lims$ll, upper.limits = lims$ul,
+    type.measure = "mse", nfolds = length(unique(foldid))
+  )
+  saveRDS(cv_ridge, file = file.path(reg_dir, "ridge_cvglmnet.rds"))
+  
+  # Plot CV
+  png(file.path(reg_dir, "ridge_cv_curve.png"), width = 1000, height = 600)
+  plot(cv_ridge); title("Ridge CV (MSE)")
+  dev.off()
+  
+  # Coefficients
+  ridge_coefs <- write_nonzero_coefs(cv_ridge, USE_LAMBDA, kept_cols,
+                                     file.path(reg_dir, paste0("ridge_coefs_", USE_LAMBDA, ".csv")))
+  
+  # Ajustement in-sample
+  yhat_ridge <- as.numeric(predict(cv_ridge, newx = X_mat, s = USE_LAMBDA))
+  df_ridge   <- cv_ridge$glmnet.fit$df[which(cv_ridge$glmnet.fit$lambda == get(USE_LAMBDA, cv_ridge))]
+  if (length(df_ridge) == 0) df_ridge <- cv_ridge$glmnet.fit$df[which.min(abs(cv_ridge$glmnet.fit$lambda - get(USE_LAMBDA, cv_ridge)))]
+  metrics_list[["ridge"]] <- compute_fit_stats(y_vec, yhat_ridge, df = df_ridge, name = paste0("RIDGE_", USE_LAMBDA))
+  
+  # Plot fit
+  png(file.path(reg_dir, paste0("ridge_fit_", USE_LAMBDA, ".png")), width = 1000, height = 600)
+  plot(model_df$Date, y_vec, type = "l", lwd = 2, col = "grey50",
+       ylab = "Valeur du Facteur Z", xlab = "Date",
+       main = paste0("Ajustement Ridge (", USE_LAMBDA, ")"))
+  lines(model_df$Date, yhat_ridge, lwd = 2)
+  legend("topleft", bty = "n", legend = c("Z Observé", "Ridge (fitted)"),
+         lwd = 2, col = c("grey50", "black"))
+  dev.off()
+}
+
+# =========================
+# LASSO (alpha = 1)
+# =========================
+if (RUN_LASSO) {
+  cat("• Estimation LASSO (alpha=1)...\n")
+  cv_lasso <- cv.glmnet(
+    x = X_mat, y = y_vec, family = "gaussian", alpha = 1,
+    standardize = TRUE, foldid = foldid,
+    lower.limits = lims$ll, upper.limits = lims$ul,
+    type.measure = "mse", nfolds = length(unique(foldid))
+  )
+  saveRDS(cv_lasso, file = file.path(reg_dir, "lasso_cvglmnet.rds"))
+  
+  # Plot CV
+  png(file.path(reg_dir, "lasso_cv_curve.png"), width = 1000, height = 600)
+  plot(cv_lasso); title("Lasso CV (MSE)")
+  dev.off()
+  
+  # Coefficients
+  lasso_coefs <- write_nonzero_coefs(cv_lasso, USE_LAMBDA, kept_cols,
+                                     file.path(reg_dir, paste0("lasso_coefs_", USE_LAMBDA, ".csv")))
+  
+  # Ajustement in-sample
+  yhat_lasso <- as.numeric(predict(cv_lasso, newx = X_mat, s = USE_LAMBDA))
+  df_lasso   <- cv_lasso$glmnet.fit$df[which(cv_lasso$glmnet.fit$lambda == get(USE_LAMBDA, cv_lasso))]
+  if (length(df_lasso) == 0) df_lasso <- cv_lasso$glmnet.fit$df[which.min(abs(cv_lasso$glmnet.fit$lambda - get(USE_LAMBDA, cv_lasso)))]
+  metrics_list[["lasso"]] <- compute_fit_stats(y_vec, yhat_lasso, df = df_lasso, name = paste0("LASSO_", USE_LAMBDA))
+  
+  # Plot fit
+  png(file.path(reg_dir, paste0("lasso_fit_", USE_LAMBDA, ".png")), width = 1000, height = 600)
+  plot(model_df$Date, y_vec, type = "l", lwd = 2, col = "grey50",
+       ylab = "Valeur du Facteur Z", xlab = "Date",
+       main = paste0("Ajustement Lasso (", USE_LAMBDA, ")"))
+  lines(model_df$Date, yhat_lasso, lwd = 2)
+  legend("topleft", bty = "n", legend = c("Z Observé", "Lasso (fitted)"),
+         lwd = 2, col = c("grey50", "black"))
+  dev.off()
+}
+
+# --- Export des métriques comparatives ---
+if (length(metrics_list)) {
+  metrics <- do.call(rbind, metrics_list)
+  write.csv(metrics, file.path(reg_dir, "regularization_metrics.csv"), row.names = FALSE)
+  print(metrics)
+}
+
+cat("Sorties ridge/lasso écrites dans 'scripts/outputs_USA_Z_Factor/regularization/'.\n\n")
+
+
+
+################################################################################
+# ÉTAPE 3ter : Résumé texte des résultats Ridge/Lasso
+################################################################################
+cat("--- Étape 3ter: Rédaction d'un résumé texte (regularization_summary.txt) ---\n")
+
+# Sécurité : s'il n'existe pas, reg_dir a été défini plus haut
+if (!exists("reg_dir")) {
+  output_dir <- "scripts/outputs_USA_Z_Factor"
+  reg_dir    <- file.path(output_dir, "regularization")
+  dir.create(reg_dir, showWarnings = FALSE, recursive = TRUE)
+}
+
+# Helpers
+idx_for_lambda <- function(cvfit, lam) which.min(abs(cvfit$lambda - lam))
+take_lambda <- function(cvfit, use) if (use == "lambda.min") cvfit$lambda.min else cvfit$lambda.1se
+nonzero_df <- function(cvfit, s_label){
+  cf <- as.matrix(coef(cvfit, s = s_label))
+  df <- data.frame(variable = rownames(cf), coef = as.numeric(cf[,1]), row.names = NULL)
+  df <- subset(df, variable != "(Intercept)")
+  df$nonzero <- df$coef != 0
+  df[df$nonzero, c("variable","coef")]
+}
+
+# Prépare le fichier
+txt_path <- file.path(reg_dir, "regularization_summary.txt")
+con <- file(txt_path, open = "wt"); on.exit(close(con), add = TRUE)
+
+wln <- function(...) cat(paste0(..., collapse = ""), "\n", file = con, append = TRUE)
+
+wln("Résumé des régressions régularisées — Facteur Z (USA)")
+wln("Généré le : ", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"), "")
+wln("Paramètres :")
+if (exists("NB_LAGS"))                wln("  NB_LAGS = ", NB_LAGS)
+if (exists("MAX_VARIABLES_IN_MODEL")) wln("  MAX_VARIABLES_IN_MODEL = ", MAX_VARIABLES_IN_MODEL)
+wln("  K_FOLDS = ", if (exists("K_FOLDS")) K_FOLDS else "5",
+    " | USE_LAMBDA = ", if (exists("USE_LAMBDA")) USE_LAMBDA else "lambda.1se")
+wln("  constraint_sign = ", if (exists("constraint_sign")) constraint_sign else FALSE, "")
+wln("Données : n = ", nrow(model_df), " obs ; p (après filtrage variance nulle) = ",
+    if (exists("X_mat")) ncol(X_mat) else NA, "")
+if (exists("nzv2") && length(nzv2$dropped)) {
+  wln("Colonnes supprimées (variance nulle) : ", paste(nzv2$dropped, collapse = ", "), "")
+}
+
+# Comparaison avec OLS si dispo
+if (exists("best_model")) {
+  yhat_ols <- as.numeric(predict(best_model, newdata = model_df))
+  rmse_ols <- sqrt(mean((model_df$Y - yhat_ols)^2))
+  wln("=== OLS (meilleur modèle par AIC, déjà estimé) ===")
+  wln("AIC = ", sprintf("%.3f", AIC(best_model)),
+      " | BIC = ", sprintf("%.3f", BIC(best_model)),
+      " | RMSE (in-sample) = ", sprintf("%.5f", rmse_ols))
+  ols_vars <- setdiff(names(coef(best_model)), "(Intercept)")
+  wln("Variables OLS : ", paste(ols_vars, collapse = ", "), "")
+}
+
+# Résumé RIDGE
+if (exists("RUN_RIDGE") && RUN_RIDGE && exists("cv_ridge")) {
+  lam_ridge <- take_lambda(cv_ridge, USE_LAMBDA)
+  idx_r     <- idx_for_lambda(cv_ridge, lam_ridge)
+  yhat_r    <- as.numeric(predict(cv_ridge, newx = X_mat, s = USE_LAMBDA))
+  rmse_r    <- sqrt(mean((y_vec - yhat_r)^2))
+  cor_r     <- suppressWarnings(cor(y_vec, yhat_r))
+  df_r      <- cv_ridge$glmnet.fit$df[idx_r]  # nb de coef non nuls (glmnet)
+  cv_mse_r  <- cv_ridge$cvm[idx_r]
+  cv_sd_r   <- cv_ridge$cvsd[idx_r]
+  
+  nz_r      <- nonzero_df(cv_ridge, USE_LAMBDA)
+  nz_r      <- nz_r[order(-abs(nz_r$coef)), , drop = FALSE]
+  
+  wln("=== RIDGE (alpha = 0) — ", USE_LAMBDA, " ===")
+  wln("lambda = ", sprintf("%.6f", lam_ridge),
+      " | df (glmnet) = ", df_r,
+      " | CV-MSE = ", sprintf("%.6f", cv_mse_r), " ± ", sprintf("%.6f", cv_sd_r),
+      " | RMSE (in-sample) = ", sprintf("%.5f", rmse_r),
+      " | corr(Y, Ŷ) = ", sprintf("%.4f", cor_r))
+  wln("Top coefficients (|coef| décroissant) :")
+  if (nrow(nz_r)) {
+    topk <- head(nz_r, 20)
+    apply(topk, 1, function(row) wln("  ", sprintf("%-28s", row[["variable"]]), " = ", sprintf("% .6f", row[["coef"]])))
+  } else {
+    wln("  (Ridge donne souvent tous les coefficients non nuls ; cf. CSV détaillé.)")
+  }
+  wln("")
+  
+  # Overlap OLS si dispo
+  if (exists("best_model")) {
+    ols_vars <- setdiff(names(coef(best_model)), "(Intercept)")
+    inter_r  <- intersect(ols_vars, nz_r$variable)
+    wln("Chevauchement avec OLS (variables) : ", if (length(inter_r)) paste(inter_r, collapse = ", ") else "(aucune)", "")
+  }
+}
+
+# Résumé LASSO
+if (exists("RUN_LASSO") && RUN_LASSO && exists("cv_lasso")) {
+  lam_lasso <- take_lambda(cv_lasso, USE_LAMBDA)
+  idx_l     <- idx_for_lambda(cv_lasso, lam_lasso)
+  yhat_l    <- as.numeric(predict(cv_lasso, newx = X_mat, s = USE_LAMBDA))
+  rmse_l    <- sqrt(mean((y_vec - yhat_l)^2))
+  cor_l     <- suppressWarnings(cor(y_vec, yhat_l))
+  df_l      <- cv_lasso$glmnet.fit$df[idx_l]  # nb de coef non nuls (lasso)
+  cv_mse_l  <- cv_lasso$cvm[idx_l]
+  cv_sd_l   <- cv_lasso$cvsd[idx_l]
+  
+  nz_l      <- nonzero_df(cv_lasso, USE_LAMBDA)
+  nz_l      <- nz_l[order(-abs(nz_l$coef)), , drop = FALSE]
+  
+  wln("=== LASSO (alpha = 1) — ", USE_LAMBDA, " ===")
+  wln("lambda = ", sprintf("%.6f", lam_lasso),
+      " | df (glmnet) = ", df_l,
+      " | CV-MSE = ", sprintf("%.6f", cv_mse_l), " ± ", sprintf("%.6f", cv_sd_l),
+      " | RMSE (in-sample) = ", sprintf("%.5f", rmse_l),
+      " | corr(Y, Ŷ) = ", sprintf("%.4f", cor_l))
+  wln("Coefficients non nuls (|coef| décroissant) :")
+  if (nrow(nz_l)) {
+    topk <- head(nz_l, 30)
+    apply(topk, 1, function(row) wln("  ", sprintf("%-28s", row[["variable"]]), " = ", sprintf("% .6f", row[["coef"]])))
+  } else {
+    wln("  (Aucun coefficient non nul à ce lambda.)")
+  }
+  wln("")
+  
+  # Overlap OLS si dispo
+  if (exists("best_model")) {
+    ols_vars <- setdiff(names(coef(best_model)), "(Intercept)")
+    inter_l  <- intersect(ols_vars, nz_l$variable)
+    wln("Chevauchement avec OLS (variables) : ", if (length(inter_l)) paste(inter_l, collapse = ", ") else "(aucune)", "")
+  }
+}
+
+wln("Notes d'interprétation :")
+wln("- Les métriques CV (MSE ± écart-type) proviennent d'une validation croisée par BLOCS temporels,")
+wln("  ce qui est adapté aux séries temporelles mais ne remplace pas une vraie évaluation out-of-sample (rolling).")
+wln("- Les coefficients glmnet sont reportés sur l'échelle originale des variables (pas standardisés dans le fichier).")
+wln("- Pour une décision finale, compare aussi les performances hors-échantillon (ex. rolling window/expanding).")
+
+cat(sprintf("Résumé texte sauvegardé dans '%s'.\n\n", txt_path))
