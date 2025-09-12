@@ -20,12 +20,12 @@ set.seed(123)  # reproductibilité globale
 
 # ----------------------- PARAMÈTRES GÉNÉRAUX ----------------------- #
 data_var_path   <- "data/processed/data_var_for_model.csv"
-best_model_path <- "scripts/model/best_model.rds"   # modèle lm de Z
-out_dir         <- "output"
+best_model_path <- "scripts/scripts_robustness/model/best_model_oos.rds"   # modèle lm de Z
+out_dir         <- "output_robustness"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 # Variables du VAR (ordre fixé, GPR en premier pour identification récursive)
-allowed_vect <- c("log_inv_pc","log_gdp_pc","log_hours_pc","log_oil_real","infl_yoy_pct")
+allowed_vect <- c("t10Y2Y","gs2","log_gdp_pc","log_hours_pc","log_sp500_real")
 i_var_str <- c("log_GPRD", allowed_vect)
 
 # Paramètres VAR + IRF
@@ -40,8 +40,8 @@ chol_jitter <- 1e-10      # robustesse Cholesky
 scale_Z <- FALSE
 
 # ---- Paramètres GIRF-PD (forme fermée, single (p, rho)) ---- #
-p0   <- 0.007954558   # PD inconditionnelle
-rho0 <- 0.02383827    # corrélation d'actif
+p0   <- 0.0318358   # PD inconditionnelle
+rho0 <- 0.05077221    # corrélation d'actif
 stopifnot(p0 > 0 && p0 < 1, rho0 > 0 && rho0 < 1)
 
 # ----------------------- OUTILS VAR/BVAR ----------------------- #
@@ -688,4 +688,4 @@ e1_median_by_date <- DT_e1_wide[, .(
 e1_median_by_date[, date := DT_e1_wide$date]
 setcolorder(e1_median_by_date, c("date", "median_e1"))
 
-fwrite(e1_median_by_date, "output/e1_median.csv")
+fwrite(e1_median_by_date, "output_robustness/e1_median.csv")

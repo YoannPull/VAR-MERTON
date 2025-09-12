@@ -73,18 +73,36 @@ y_offset_gpr <- diff(yrange_gpr) * 0.03
 events_pos_gpr <- gpr_data[evt_gpr, on = .(date), roll = "nearest"][
   , .(x = date, y = pmin(GPRD + y_offset_gpr, yrange_gpr[2]), label)]
 
-# Données de défaut
-data_risk_usa <- fread("data/processed/data_risk_EBA.csv", header = TRUE, sep = ";")
-data_risk_usa <- setDT(data_risk_all %>% filter(Country == "United States"))
-data_risk_usa <- data_risk_usa[,.(Date, default = Corpo_DR_WA)]
-data_risk_usa$Date <- as.Date(data_risk_usa$Date, format = "%d/%m/%Y")
 
+load_csv_dt <- function(filename) {
+  dt <- fread(file.path(data_dir,filename))
+  dt[, DATE := as.Date(observation_date)]
+  dt[, observation_date := NULL]
+  return(dt)
+}
+# Conversion de yearqtr en décimal
+convert_qtr_to_decimal <- function(qtr) {
+  year <- floor(as.numeric(format(qtr, "%Y")))
+  qnum <- as.numeric(cycle(qtr))  # retourne 1 à 4
+  return(year + (qnum - 1) * 0.25)
+}
+data_dir <- "data/raw"
 
+data_risk_usa <- load_csv_dt("default/DRALACBN.csv")
+data_risk_usa[, quarter := as.yearqtr(DATE)]
+data_risk_usa <- data_risk_usa[, .(default = DRALACBN), by = quarter]
+data_risk_usa[, Date_quarter := convert_qtr_to_decimal(quarter)]
+data_risk_usa[, default := default/100]
+data_risk_usa[, Date := as.Date(paste0(
+  floor(Date_quarter), "-",
+  sprintf("%02d", 3 * (Date_quarter %% 1 / 0.25) + 1),
+  "-01"
+))]
 
 # ====================================================================
-# GRAPHIQUE 0 — Données de défaut EBA
+# GRAPHIQUE 1 — GPR avec événements (sans titre/description)
 # ====================================================================
-graph_eba <-
+graph_dralacbn <-
   ggplot(data_risk_usa, aes(x = Date, y = default*100)) +
   geom_line(linewidth = 0.9, alpha = 0.95, color = squareblue) +
   scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
@@ -92,8 +110,7 @@ graph_eba <-
   labs(x = "Date", y = "Default (%)") +
   theme_square() + blank_titles
 
-print(graph_eba)
-
+print(graph_dralacbn)
 
 # ====================================================================
 # GRAPHIQUE 1 — GPR avec événements (sans titre/description)
@@ -125,7 +142,7 @@ print(graph_gpr_beau)
 # ====================================================================
 # GRAPHIQUE 2 — Choc structurel e_{1,t} (sans titre/description)
 # ====================================================================
-e1_csv <- "output/e1_median.csv"
+e1_csv <- "output_robustness/e1_median.csv"
 e1_dt <- fread(e1_csv)
 e1_dt[, date := as.Date(date)]
 setnames(e1_dt,"median_e1","e1")
@@ -189,9 +206,9 @@ plot_bands_smart <- function(bands_df, ylab_txt = "Response", y_expand_mult = 0)
 # ====================================================================
 # Autres graphiques (IRF, Z, PD) — sans titres ; Z/PD avec y un peu élargie
 # ====================================================================
-var_bands <- fread("output/irf/VAR/oirf_bands.csv")
-z_bands   <- fread("output/irf/Z/psiZ_bands.csv")
-pd_bands  <- fread("output/irf/PD/girf_pd_bands.csv")
+var_bands <- fread("output_robustness/irf/VAR/oirf_bands.csv")
+z_bands   <- fread("output_robustness/irf/Z/psiZ_bands.csv")
+pd_bands  <- fread("output_robustness/irf/PD/girf_pd_bands.csv")
 
 p_var <- plot_bands_smart(var_bands, ylab_txt = "Response", y_expand_mult = 0.05)
 print(p_var)
@@ -205,9 +222,9 @@ print(p_pd)
 # ====================================================================
 # SCENARIO : (IRF, Z, PD) — mêmes réglages
 # ====================================================================
-var_bands_scenario <- fread("output/scenario/irf/VAR/oirf_bands.csv")
-z_bands_scenario   <- fread("output/scenario/irf/Z/psiZ_bands.csv")
-pd_bands_scenario  <- fread("output/scenario/irf/PD/girf_pd_bands.csv")
+var_bands_scenario <- fread("output_robustness/scenario/irf/VAR/oirf_bands.csv")
+z_bands_scenario   <- fread("output_robustness/scenario/irf/Z/psiZ_bands.csv")
+pd_bands_scenario  <- fread("output_robustness/scenario/irf/PD/girf_pd_bands.csv")
 
 p_var_scenario <- plot_bands_smart(var_bands_scenario, ylab_txt = "Response", y_expand_mult = 0.05)
 print(p_var_scenario)
@@ -221,17 +238,17 @@ print(p_pd_scenario)
 # ====================================================================
 # SAUVEGARDE DES FIGURES
 # ====================================================================
-dir.create("output/img", showWarnings = FALSE, recursive = TRUE)
+dir.create("output_robustness/img", showWarnings = FALSE, recursive = TRUE)
 
-ggsave("output/img/graph_eba.png", graph_eba, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_gpr.png", graph_gpr_beau, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_e1.png", p_e1_events, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_var.png", p_var, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_z.png", p_z, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_pd.png", p_pd, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_var_scenario.png", p_var_scenario, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_z_scenario.png", p_z_scenario, width = 9, height = 5, dpi = 300)
-ggsave("output/img/graph_pd_scenario.png", p_pd_scenario, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_dralacbn.png", graph_dralacbn, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_gpr.png", graph_gpr_beau, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_e1.png", p_e1_events, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_var.png", p_var, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_z.png", p_z, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_pd.png", p_pd, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_var_scenario.png", p_var_scenario, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_z_scenario.png", p_z_scenario, width = 9, height = 5, dpi = 300)
+ggsave("output_robustness/img/graph_pd_scenario.png", p_pd_scenario, width = 9, height = 5, dpi = 300)
 
 
 

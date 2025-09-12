@@ -1,7 +1,7 @@
 # ================================================================
-#   BVAR (NIW) + OIRF (Cholesky) + ψZ (Koop) + μ_{t+h} exacte
-#   + s^2(h), s^2_δ(h) + GIRF-PD + e_{1,t}
-#   -- Script unique & optimisé --
+#   BVAR (NIW) + OIRF (Cholesky) + Injection vers Z (Koop shock)
+#   + μ_{t+h} exact + s^2(h), s^2_δ(h) + GIRF PD (Koop)
+#   + DIAG (1) stabilité & (2) résidus
 # ================================================================
 
 suppressPackageStartupMessages({
@@ -9,9 +9,9 @@ suppressPackageStartupMessages({
   library(mniw)
   library(parallel)
   library(ggplot2)
-  library(lmtest)     # DIAG (résidus)
-  library(tseries)    # DIAG (résidus)
-  library(matrixStats)
+  library(lmtest)    # DIAG (2)
+  library(tseries)   # DIAG (2)
+  library(matrixStats) 
 })
 
 theme_set(theme_minimal(base_size = 14))
@@ -20,29 +20,26 @@ set.seed(123)  # reproductibilité globale
 
 # ----------------------- PARAMÈTRES GÉNÉRAUX ----------------------- #
 data_var_path   <- "data/processed/data_var_for_model.csv"
-best_model_path <- "scripts/model/best_model.rds"   # modèle lm de Z
-out_dir         <- "output"
+best_model_path <- "scripts/scripts_robustness/model/best_model_oos.rds"   # produit par ton pipeline Z existant
+out_dir         <- "output_robustness/scenario"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+dt_e1_median <- fread("output_robustness/e1_median.csv")
 
 # Variables du VAR (ordre fixé, GPR en premier pour identification récursive)
-allowed_vect <- c("log_inv_pc","log_gdp_pc","log_hours_pc","log_oil_real","infl_yoy_pct")
-i_var_str <- c("log_GPRD", allowed_vect)
+allowed_vect <- c("t10Y2Y","gs2","log_gdp_pc","log_hours_pc","log_sp500_real")
+i_var_str <- c("log_GPRD",allowed_vect)
 
 # Paramètres VAR + IRF
-p_lags      <- 2          # ordre VAR
-nrep        <- 20000      # nb de tirages postérieurs
-seed        <- 123
-h           <- 12         # horizons (0..h)
-impulse_ix  <- 1          # choc sur GPR (1ère variable)
-chol_jitter <- 1e-10      # robustesse Cholesky
+p_lags     <- 2        # ordre VAR
+nrep       <- 20000    # nb de tirages postérieurs (B, Σ)
+seed       <- 123
+h          <- 12       # horizons (0..h)
+impulse_ix <- 1        # choc sur GPR (1ère variable)
+chol_jitter <- 1e-10   # robustesse Cholesky
+shock_scale <- max(dt_e1_median$median_e1)
 
-# (Optionnel) standardiser Z sur l'échelle du training
-scale_Z <- FALSE
-
-# ---- Paramètres GIRF-PD (forme fermée, single (p, rho)) ---- #
-p0   <- 0.007954558   # PD inconditionnelle
-rho0 <- 0.02383827    # corrélation d'actif
-stopifnot(p0 > 0 && p0 < 1, rho0 > 0 && rho0 < 1)
+# (Optionnel) standardiser Z sur l'échelle du training pour éviter saturation PD
+scale_Z <- FALSE  # passe à TRUE si besoin
 
 # ----------------------- OUTILS VAR/BVAR ----------------------- #
 simulate_bvar_niw <- function(Y, p = 2, nrep = 5000, seed = 123) {
@@ -56,9 +53,13 @@ simulate_bvar_niw <- function(Y, p = 2, nrep = 5000, seed = 123) {
   nu_post <- T_eff - m
   if (nu_post <= (k - 1)) stop(sprintf("IW non définie: besoin T_eff - m > k - 1 (ici %d <= %d).", nu_post, k - 1))
   XtX <- crossprod(X_t); XtY <- crossprod(X_t, Y_t)
+  
+  # OLS stable
   B_ols <- qr.coef(qr(XtX), XtY)
   U_ols <- Y_t - X_t %*% B_ols
   S     <- crossprod(U_ols)
+  
+  # (XtX)^(-1) stable
   XtX_inv <- chol2inv(chol(XtX))
   
   draws_B     <- array(NA_real_, dim = c(m, k, nrep))
@@ -79,11 +80,13 @@ build_companion <- function(B, k, p) {
   A_comp
 }
 
+# stabilité Hamilton TSA, cercle unitaire
 is_stable <- function(B, k, p) {
   rho <- max(Mod(eigen(build_companion(B, k, p), only.values = TRUE)$values))
   rho < 1 - 1e-10
 }
 
+# Décompose B (m x k) en intercept c (k) et liste {A_1,..,A_p}
 extract_c_A_list <- function(B, k, p) {
   c_vec <- as.numeric(B[1, ])
   A_stack <- t(B[-1, , drop = FALSE])                # k x (k*p)
@@ -92,11 +95,11 @@ extract_c_A_list <- function(B, k, p) {
   list(c = c_vec, A = A_list)
 }
 
+# Ψ_h (MA) : (h+1) x k x k
 compute_ma_coefficients <- function(B, p, H) {
   k <- ncol(B)
   A_comp <- build_companion(B, k, p)
-  Psi <- array(0.0, dim = c(H + 1, k, k),
-               dimnames = list(horizon = 0:H, variable = NULL, shock_col = NULL))
+  Psi <- array(0.0, dim = c(H + 1, k, k), dimnames = list(horizon = 0:H, variable = NULL, shock_col = NULL))
   for (j in 1:k) {
     delta <- rep(0, k); delta[j] <- 1
     state <- c(delta, rep(0, k*(p-1)))
@@ -109,6 +112,7 @@ compute_ma_coefficients <- function(B, p, H) {
   Psi
 }
 
+# Forecast baseline E[Y_{t+h}|Ω] (zéro-chocs)
 forecast_baseline_path <- function(B, Y_hist, p, H) {
   k <- ncol(Y_hist)
   decomp <- extract_c_A_list(B, k, p)
@@ -127,85 +131,65 @@ forecast_baseline_path <- function(B, Y_hist, p, H) {
 
 # ----------------------- CHARGEMENT DES DONNÉES VAR ----------------------- #
 stopifnot(file.exists(data_var_path))
-DT_raw <- fread(data_var_path)
-# Conserve la colonne de date si elle existe
-if ("Date" %in% names(DT_raw)) {
-  dates <- as.Date(DT_raw$Date)
-} else {
-  dates <- NULL
-}
+DT <- fread(data_var_path)
+dates <- DT$Date
+if ("Date" %in% names(DT))         DT[, Date := NULL]
+if ("Date_quarter" %in% names(DT)) DT[, Date_quarter := NULL]
 
-# Ne garder QUE les colonnes du VAR dans le bon ordre (évite l'erreur de dimnames)
-missing_cols <- setdiff(i_var_str, names(DT_raw))
-if (length(missing_cols) > 0) stop("Colonnes manquantes: ", paste(missing_cols, collapse = ", "))
-DT <- copy(DT_raw[, ..i_var_str])
+missing_cols <- setdiff(i_var_str, names(DT))
+if (length(missing_cols) > 0) stop("Colonnes manquantes dans data_var_for_model: ",
+                                   paste(missing_cols, collapse = ", "))
 setcolorder(DT, i_var_str)
-
 if (anyNA(DT)) DT <- na.omit(DT)
 
-Y <- ts(as.matrix(DT), start = c(1990, 2), frequency = 4)
-variables <- colnames(Y)  # référence unique des noms
-k <- ncol(Y)
+Y <- ts(as.matrix(DT[, ..i_var_str]), start = c(1990, 2), frequency = 4)
+variables <- colnames(Y)
 
 # ----------------------- ESTIMATION + Ψ (PARALLÈLE) ----------------------- #
 res <- simulate_bvar_niw(Y, p = p_lags, nrep = nrep, seed = seed)
+k <- res$k; p <- res$p
 
-keep <- vapply(1:dim(res$B)[3], function(i) is_stable(res$B[,, i], k, p_lags), logical(1))
+keep <- vapply(1:dim(res$B)[3], function(i) is_stable(res$B[,, i], k, p), logical(1))
 message(sprintf("Tirages stables: %d / %d (%.1f%%).", sum(keep), length(keep), 100*mean(keep)))
 idx_kept <- which(keep)
-
-# --- Sélectionne exactement 10 000 tirages stables (ou tous si < 10k) ---
-M_target <- 10000L
-if (length(idx_kept) >= M_target) {
-  set.seed(seed)
-  idx_kept <- sample(idx_kept, M_target)
-  message(sprintf("Échantillonnage de %d tirages stables (sur %d).", M_target, sum(keep)))
-} else {
-  warning(sprintf("Seulement %d tirages stables disponibles — on gardera tout.", length(idx_kept)))
-}
+if (length(idx_kept) < 50) warning("Peu de tirages stables — bandes potentiellement bruitées.")
 
 num_cores <- max(1, parallel::detectCores() - 1)
 cl <- parallel::makeCluster(num_cores)
 on.exit(try(stopCluster(cl), silent = TRUE), add = TRUE)
 
-clusterExport(cl, varlist = c("res","idx_kept","p_lags","h","build_companion","compute_ma_coefficients"),
+clusterExport(cl, varlist = c("res","idx_kept","p","h","build_companion","compute_ma_coefficients"),
               envir = environment())
 
 psi_list <- parLapply(cl, idx_kept, function(i) {
-  compute_ma_coefficients(res$B[,, i], p = p_lags, H = h)
+  compute_ma_coefficients(res$B[,, i], p = p, H = h)
 })
 
 M_kept <- length(idx_kept)
-psi_draws <- array(
-  NA_real_,
-  dim = c(h + 1, k, k, M_kept),
-  dimnames = list(
-    horizon   = 0:h,
-    variable  = variables,
-    shock_col = variables,
-    draw      = NULL
-  )
-)
+psi_draws <- array(NA_real_, dim = c(h + 1, k, k, M_kept),
+                   dimnames = list(horizon = 0:h, variable = variables, shock_col = variables, draw = NULL))
 for (jj in seq_len(M_kept)) psi_draws[ , , , jj] <- psi_list[[jj]]
 
 B_kept     <- res$B[,, idx_kept]   # (m x k x M_kept)
 Sigma_kept <- res$S[,, idx_kept]   # (k x k x M_kept)
 saveRDS(list(Psi_draws = psi_draws, B_kept = B_kept, Sigma_kept = Sigma_kept,
-             p = p_lags, k = k, h = h, variables = variables),
+             p = p, k = k, h = h, variables = variables),
         file = file.path(out_dir, "var_kernel.rds"))
 
-cat("Noyau VAR (Ψ, B, Σ) -> ", file.path(out_dir, "var_kernel.rds"), "
-")
+cat("Noyau VAR (Ψ, B, Σ) sauvegardé dans:\n",
+    "-", file.path(out_dir, "var_kernel.rds"), "\n")
 
-# ==================== DIAG STABILITÉ (rapide) ==================== #
+# ==================== DIAG (1) STABILITÉ ==================== #
 max_root <- function(Bmat, p, k) {
   max(Mod(eigen(build_companion(Bmat, k, p), only.values = TRUE)$values))
 }
 roots <- vapply(1:dim(B_kept)[3], function(i) max_root(B_kept[,,i], p_lags, k), numeric(1))
 stable_share <- mean(roots < 1)
-cat(sprintf("Stabilité: %.1f%% stables; médiane |λ|max: %.3f; pct95: %.3f
-",
+cat(sprintf("DIAG(1) Stabilité — part tirages stables: %.1f%%; médiane |λ|max: %.3f; pct95: %.3f\n",
             100*stable_share, median(roots), quantile(roots, .95)))
+png(file.path(out_dir,"diag1_roots_hist.png"), width=900, height=500)
+hist(roots, breaks=30, main="Max root (post draws)", xlab="|λ|max"); abline(v=1, col="red", lwd=2)
+dev.off()
 
 # ==================== OIRF (Cholesky) ==================== #
 compute_oirf <- function(psi_draws, Sigma_kept, impulse_idx = 1,
@@ -215,16 +199,26 @@ compute_oirf <- function(psi_draws, Sigma_kept, impulse_idx = 1,
   k <- dim(psi_draws)[2]
   M <- dim(psi_draws)[4]
   variables <- dimnames(psi_draws)$variable
+  
   oirf_draws <- array(NA_real_, dim = c(H + 1, k, M),
                       dimnames = list(horizon = 0:H, variable = variables, draw = NULL))
+  
   for (m in 1:M) {
     Psi_m   <- psi_draws[,,, m, drop=FALSE][,,,1]
     Sigma_m <- Sigma_kept[,, m]
+    
+    # Cholesky robuste (Sigma = L %*% t(L), L triangulaire inférieure)
     L <- tryCatch(t(chol(Sigma_m)),
                   error = function(e) t(chol(Sigma_m + diag(jitter, k))))
-    delta_o <- L[, impulse_idx]  # choc d’1 écart-type structurel
-    for (hh in 0:H) oirf_draws[hh+1, , m] <- Psi_m[hh+1, , ] %*% delta_o
+    delta_o <- shock_scale * L[, impulse_idx]  # ici c'est notre choc d'un écart-type
+    cat("AFFICHAGE DE DELTA_O : \n")
+    print(delta_o)
+    
+    for (hh in 0:H) {
+      oirf_draws[hh+1, , m] <- Psi_m[hh+1, , ] %*% delta_o
+    }
   }
+  
   # Bandes
   out <- vector("list", k)
   for (r in 1:k) {
@@ -242,12 +236,25 @@ compute_oirf <- function(psi_draws, Sigma_kept, impulse_idx = 1,
 oirf_res   <- compute_oirf(psi_draws, Sigma_kept, impulse_idx = impulse_ix, jitter = chol_jitter)
 oirf_draws <- oirf_res$draws
 oirf_bands <- oirf_res$bands
+
 saveRDS(oirf_draws, file = file.path(out_dir, "oirf_draws.rds"))
 fwrite(oirf_bands,  file = file.path(out_dir, "oirf_bands.csv"))
-cat("OIRF -> ",
-    file.path(out_dir, "oirf_draws.rds"), " ; ",
-    file.path(out_dir, "oirf_bands.csv"), "
-", sep = "")
+cat("Fichiers OIRF écrits :\n",
+    "-", file.path(out_dir, "oirf_draws.rds"), "\n",
+    "-", file.path(out_dir, "oirf_bands.csv"), "\n")
+
+plot_oirf <- function(df, title_txt = "Orthogonalized IRFs (Cholesky)") {
+  ggplot(df, aes(x = horizon, y = median)) +
+    geom_ribbon(aes(ymin = lower90, ymax = upper90), alpha = 0.30) +
+    geom_ribbon(aes(ymin = lower68, ymax = upper68), alpha = 0.55) +
+    geom_line(linewidth = 1.05) +
+    geom_hline(yintercept = 0) +
+    facet_wrap(~ variable, scales = "free_y") +
+    labs(x = "Horizon (quarters)", y = "Response", title = title_txt) +
+    theme(strip.text = element_text(face = "bold"),
+          axis.title = element_text(face = "bold"))
+}
+print(plot_oirf(oirf_bands))
 
 # ----------------------- OUTILS MODELE Z (lm) & TERMES ----------------------- #
 extract_terms_from_best_model <- function(best_model_path,
@@ -259,7 +266,7 @@ extract_terms_from_best_model <- function(best_model_path,
   betas <- coef(best_model)
   beta0 <- unname(betas["(Intercept)"])
   betas <- betas[names(betas) != "(Intercept)"]
-  if (length(betas) == 0) stop("Modèle Z sans prédicteurs.")
+  if (length(betas) == 0) stop("Le modèle ne contient pas de prédicteurs (seulement l'intercept).")
   parse_term <- function(name) {
     m <- regexec("^(.*)_lag([0-9]+)$", name)
     g <- regmatches(name, m)[[1]]
@@ -280,10 +287,13 @@ extract_terms_from_best_model <- function(best_model_path,
   keep_row <- in_var & not_gpr & allowed
   if (any(!keep_row)) {
     dropped <- terms_df$term[!keep_row]
-    if (length(dropped) > 0) warning("Termes ignorés: ", paste(dropped, collapse = ", "))
+    if (length(dropped) > 0) {
+      warning(sprintf("Termes ignorés (hors VAR / GPR / non-autorisés): %s",
+                      paste(dropped, collapse = ", ")))
+    }
     terms_df <- terms_df[keep_row, , drop = FALSE]
   }
-  if (nrow(terms_df) == 0) stop("Aucun terme Z valide pour l'injection.")
+  if (nrow(terms_df) == 0) stop("Aucun terme valide pour l'injection vers Z.")
   terms_df$col <- match(terms_df$base, vars_in_var)
   list(terms = terms_df, beta0 = beta0, best_model = best_model)
 }
@@ -293,23 +303,27 @@ terms_df   <- em$terms
 beta0      <- em$beta0
 best_model <- em$best_model
 
-# ----------------------- INJECTION OIRF -> Z (choc unitaire) ----------------------- #
+# ----------------------- INJECTION OIRF -> Z (même choc) ----------------------- #
 inject_oirf_into_Z <- function(var_kernel_rds, terms_df, impulse_idx = 1, jitter = 1e-10) {
   kern <- readRDS(var_kernel_rds)
   Psi_draws  <- kern$Psi_draws     # (H+1) x k x k x M
   Sigma_kept <- kern$Sigma_kept    # (k x k x M)
   variables  <- kern$variables
   H <- kern$h; k <- length(variables); M <- dim(Psi_draws)[4]
+  
   psiZ_draws <- matrix(0.0, nrow = H + 1, ncol = M,
                        dimnames = list(horizon = 0:H, draw = NULL))
+  
   for (m in 1:M) {
     Sigma <- Sigma_kept[,,m]
     L <- tryCatch(t(chol(Sigma)),
                   error = function(e) t(chol(Sigma + diag(jitter, k))))
-    delta_o <- L[, impulse_idx]  # choc unitaire (structurel)
+    delta_o <- shock_scale * L[, impulse_idx]  # même choc que l’OIRF
+    
     Psi_m <- Psi_draws[,,,m, drop=FALSE][,,,1]
     irfY <- matrix(0.0, nrow = H + 1, ncol = k)
     for (hh in 0:H) irfY[hh+1, ] <- Psi_m[hh+1, , ] %*% delta_o
+    
     acc <- numeric(H + 1)
     for (r in 1:nrow(terms_df)) {
       lag_r  <- terms_df$lag[r]
@@ -320,6 +334,7 @@ inject_oirf_into_Z <- function(var_kernel_rds, terms_df, impulse_idx = 1, jitter
     }
     psiZ_draws[, m] <- acc
   }
+  
   qs <- c(0.05, 0.16, 0.50, 0.84, 0.95)
   qmat <- t(apply(psiZ_draws, 1, quantile, probs = qs, na.rm = TRUE))
   psiZ_bands <- data.frame(
@@ -336,13 +351,27 @@ inj_oirf <- inject_oirf_into_Z(
   impulse_idx = impulse_ix,
   jitter = chol_jitter
 )
+
 saveRDS(inj_oirf$psiZ_draws, file = file.path(out_dir, "psiZ_draws_OIRF.rds"))
 fwrite(inj_oirf$psiZ_bands,  file = file.path(out_dir, "psiZ_bands_OIRF.csv"))
 fwrite(inj_oirf$terms_used,  file = file.path(out_dir, "psiZ_terms_used_OIRF.csv"))
-cat("Injection OIRF -> Z -> ",
-    file.path(out_dir, "psiZ_draws_OIRF.rds"), " ; ",
-    file.path(out_dir, "psiZ_bands_OIRF.csv"), "
-", sep = "")
+
+cat("Injection OIRF -> Z sauvegardée dans:\n",
+    "-", file.path(out_dir, "psiZ_draws_OIRF.rds"), "\n",
+    "-", file.path(out_dir, "psiZ_bands_OIRF.csv"), "\n",
+    "-", file.path(out_dir, "psiZ_terms_used_OIRF.csv"), "\n")
+
+plot_psiZ_OIRF <- function(df, title_txt = "OIRF → Z (Koop shock)") {
+  ggplot(df, aes(x = horizon, y = median)) +
+    geom_ribbon(aes(ymin = lower90, ymax = upper90), alpha = 0.30) +
+    geom_ribbon(aes(ymin = lower68, ymax = upper68), alpha = 0.55) +
+    geom_line(linewidth = 1.05) +
+    geom_hline(yintercept = 0) +
+    labs(x = "Horizon (quarters)", y = "ψ_Z(h)", title = title_txt) +
+    theme(strip.text = element_text(face = "bold"),
+          axis.title = element_text(face = "bold"))
+}
+print(plot_psiZ_OIRF(inj_oirf$psiZ_bands))
 
 # ----------------------- OUTILS POUR VARIANCES (Ψ_h -> Σ) ----------------------- #
 build_selection_from_terms <- function(terms_df, variables) {
@@ -372,14 +401,16 @@ build_G_hq <- function(h, q, S_list, Lmax, Psi_h_all) {
   G
 }
 
-# --- μ_{t+h} baseline (exacte) --- #
+# --- Baseline μ_{t+h} EXACTE : E[Z_{t+h}|Ω] --- #
 compute_mu_baseline_draws <- function(DT_var, variables, terms_df, beta0, B_kept, p, H) {
   Tn <- nrow(DT_var); k <- length(variables); M <- dim(B_kept)[3]
   Lmax <- max(terms_df$lag)
-  if (Tn <= Lmax) stop("Pas assez d'historique pour couvrir Lmax.")
+  if (Tn <= Lmax) stop("Pas assez d'historique pour couvrir le Lmax des lags.")
   Y_all <- as.matrix(DT_var[, ..variables])
   Y_hist_for_forecast <- Y_all[(Tn - p + 1):Tn, , drop = FALSE]
-  hist_tail <- Y_all[(Tn - Lmax):Tn, , drop = FALSE]  # (Lmax+1) lignes
+  
+  # FIX off-by-one : prendre Lmax+1 lignes (t-Lmax ... t)
+  hist_tail <- Y_all[(Tn - Lmax):Tn, , drop = FALSE]
   
   mu_draws <- matrix(NA_real_, nrow = H + 1, ncol = M,
                      dimnames = list(horizon = 0:H, draw = NULL))
@@ -394,7 +425,7 @@ compute_mu_baseline_draws <- function(DT_var, variables, terms_df, beta0, B_kept
           Y_fore[hh - lag_r + 1, base_j]
         } else {
           j <- lag_r - hh # j ∈ [1, Lmax]
-          hist_tail[(Lmax + 1) - j, base_j]
+          hist_tail[(Lmax + 1) - j, base_j]  # ligne cohérente avec t-j
         }
         mu_h[hh + 1] <- mu_h[hh + 1] + beta_r * val
       }
@@ -404,7 +435,7 @@ compute_mu_baseline_draws <- function(DT_var, variables, terms_df, beta0, B_kept
   mu_draws
 }
 
-# --- s^2(h) et s^2_δ(h) --- #
+# --- s^2(h) et s^2_δ(h) (linéaire gaussien) --- #
 compute_s2_one_draw <- function(Psi_draw_one, Sigma_one, terms_df, beta_vec, sigma_eta2) {
   H <- dim(Psi_draw_one)[1] - 1
   variables <- dimnames(Psi_draw_one)$variable
@@ -427,14 +458,14 @@ compute_s2_one_draw <- function(Psi_draw_one, Sigma_one, terms_df, beta_vec, sig
   list(s2 = s2, s2_cond = s2_cond)
 }
 
-# ===================== μ, s^2, s^2_δ (par tirage) ===================== #
+# ===================== CALCUL μ_t+h, s^2, s^2_δ (par tirage) ===================== #
 kernel_path <- file.path(out_dir, "var_kernel.rds")
 stopifnot(file.exists(kernel_path))
 kern <- readRDS(kernel_path)
 Psi_draws   <- kern$Psi_draws
 Sigma_kept  <- kern$Sigma_kept
 B_kept      <- kern$B_kept
-variables_k <- kern$variables  # identique à 'variables'
+variables   <- kern$variables
 H           <- kern$h
 M           <- dim(Psi_draws)[4]
 
@@ -443,11 +474,11 @@ beta0 <- unname(co["(Intercept)"])
 betas <- co[names(co) != "(Intercept)"]
 terms <- terms_df
 beta_vec <- terms$beta
-sigma_eta2 <- (summary(best_model)$sigma)^2
+sigma_eta2 <- (summary(best_model)$sigma)^2   # variance de l'epsilon du modèle Z
 
-mu_draws <- compute_mu_baseline_draws(DT_var = as.data.table(DT), variables = variables,
+mu_draws <- compute_mu_baseline_draws(DT_var = DT, variables = variables,
                                       terms_df = terms, beta0 = beta0,
-                                      B_kept = B_kept, p = p_lags, H = H)
+                                      B_kept = B_kept, p = p, H = H)
 saveRDS(mu_draws, file = file.path(out_dir, "z_mu_draws.rds"))
 
 s2_draws        <- matrix(NA_real_, nrow = H + 1, ncol = M, dimnames = list(horizon = 0:H, draw = NULL))
@@ -456,40 +487,44 @@ for (m in 1:M) {
   Psi_m <- Psi_draws[,,, m, drop = FALSE][,,,1]
   Sigma_m <- Sigma_kept[,, m]
   res_m <- compute_s2_one_draw(Psi_m, Sigma_m, terms, beta_vec, sigma_eta2)
-  s2_draws[ , m]       <- pmax(res_m$s2, 0)
-  s2_delta_draws[ , m] <- pmax(res_m$s2_cond, 0)
+  s2_draws[ , m]       <- pmax(res_m$s2, 0)        # garde-fou
+  s2_delta_draws[ , m] <- pmax(res_m$s2_cond, 0)   # garde-fou
 }
 saveRDS(list(mu_draws = mu_draws, s2_draws = s2_draws, s2_delta_draws = s2_delta_draws, terms_used = terms),
         file = file.path(out_dir, "z_mu_and_var_components_OIRF.rds"))
 
-# ==================== DIAG RÉSIDUS (B médian) ==================== #
+# ==================== DIAG (2) RESIDUS (moyenne postérieure) ==================== #
 Y_mat <- as.matrix(as.data.frame(DT)[, i_var_str])
 Y_t <- Y_mat[(p_lags+1):nrow(Y_mat), , drop=FALSE]
 X_t <- do.call(cbind, lapply(1:p_lags, function(l) Y_mat[(p_lags+1-l):(nrow(Y_mat)-l), , drop=FALSE]))
 X_t <- cbind(1, X_t)
-B_bar <- apply(B_kept, c(1,2), median)
+B_bar <- apply(B_kept, c(1,2), mean)
 U_bar <- Y_t - X_t %*% B_bar
 
 lb_p <- apply(U_bar, 2, function(u) Box.test(as.numeric(u), lag = 12, type = "Ljung-Box")$p.value)
 bp_p <- apply(U_bar, 2, function(u) bptest(lm(u ~ X_t[,-1]))$p.value)
 jb_p <- apply(U_bar, 2, function(u) tseries::jarque.bera.test(as.numeric(u))$p.value)
+
 resid_diag <- data.frame(variable = colnames(U_bar), p_LjungBox = lb_p, p_BreuschPagan = bp_p, p_JarqueBera = jb_p, row.names = NULL)
-fwrite(resid_diag, file.path(out_dir,"diag_residual_tests.csv"))
-cat("Résidus -> ", file.path(out_dir,"diag_residual_tests.csv"), "
-", sep = "")
+fwrite(resid_diag, file.path(out_dir,"diag2_residual_tests.csv"))
+cat("DIAG(2) Résidus — p-values sauvegardées dans diag2_residual_tests.csv\n")
 
 # ===================== (Option) STANDARDISATION DE Z ===================== #
+# Utile si tu observes une saturation de la PD (ΔPD ~ 0 partout).
+# NOTE: cette étape suppose que Z_train (réponse du modèle lm best_model) reflète l'échelle cible.
 if (scale_Z) {
   Z_train <- model.response(model.frame(best_model))
   mZ <- mean(Z_train); sZ <- sd(Z_train)
   if (!is.finite(sZ) || sZ <= 0) stop("Echec standardisation: sd(Z_train) non positif.")
+  # On ne touche PAS à mu_draws en niveau si ton mapping PD est défini sur Z standardisé.
+  # Ici, on convertit tout vers l'échelle standardisée :
   mu_draws        <- (mu_draws - mZ) / sZ
   inj_oirf$psiZ_draws <- inj_oirf$psiZ_draws / sZ
   s2_draws        <- s2_draws       / (sZ^2)
   s2_delta_draws  <- s2_delta_draws / (sZ^2)
 }
 
-# ===================== GIRF de la PD (forme fermée) ===================== #
+# ===================== GIRF de la PD (forme fermée) — SINGLE (p,ρ) ===================== #
 compute_girf_pd_single <- function(psiZ_draws, mu_draws, s2_draws, s2_delta_draws,
                                    p, rho, qs = c(0.05, 0.16, 0.50, 0.84, 0.95)) {
   stopifnot(is.finite(p), p > 0, p < 1, is.finite(rho), rho > 0, rho < 1)
@@ -509,6 +544,7 @@ compute_girf_pd_single <- function(psiZ_draws, mu_draws, s2_draws, s2_delta_draw
     pd_delta <- pnorm( (qpi - sqrt(rho) * mu_delta) / s_h_delta )
     pd_diff_draws[, m] <- pd_delta - pd_base
   }
+  # Bandes (quantiles)
   qmat <- t(apply(pd_diff_draws, 1, quantile, probs = qs, na.rm = TRUE))
   bands <- data.frame(horizon = 0:H,
                       lower90 = qmat[,1], lower68 = qmat[,2], median = qmat[,3],
@@ -518,6 +554,11 @@ compute_girf_pd_single <- function(psiZ_draws, mu_draws, s2_draws, s2_delta_draw
   list(draws = pd_diff_draws, bands = bands)
 }
 
+# ---- TES paramètres ----
+p0   <- 0.0318358   # PD inconditionnelle
+rho0 <- 0.05077221    # corrélation d'actif
+stopifnot(p0 > 0 && p0 < 1, rho0 > 0 && rho0 < 1)
+
 girf_pd_single_OIRF <- compute_girf_pd_single(
   psiZ_draws     = readRDS(file.path(out_dir, "psiZ_draws_OIRF.rds")),
   mu_draws       = mu_draws,
@@ -525,100 +566,44 @@ girf_pd_single_OIRF <- compute_girf_pd_single(
   s2_delta_draws = s2_delta_draws,
   p = p0, rho = rho0
 )
+
+# Sauvegardes
 fwrite(girf_pd_single_OIRF$bands, file = file.path(out_dir, "girf_pd_bands_OIRF_SINGLE.csv"))
 saveRDS(girf_pd_single_OIRF,       file = file.path(out_dir, "girf_pd_single_OIRF.rds"))
-cat("GIRF-PD (Koop, choc OIRF) -> ",
-    file.path(out_dir, "girf_pd_bands_OIRF_SINGLE.csv"), "
-", sep = "")
+cat("GIRF-PD (Koop, choc OIRF) sauvegardé dans:\n",
+    "-", file.path(out_dir, "girf_pd_bands_OIRF_SINGLE.csv"), "\n",
+    "-", file.path(out_dir, "girf_pd_single_OIRF.rds"), "\n")
 
-# ==================== Innovations structurelles e_{j,t} ==================== #
-compute_structural_innovations <- function(B_kept, Sigma_kept, Y_mat, p_lags, dates_vec = NULL,
-                                           agg = c("median","mean")) {
-  agg <- match.arg(agg)
-  B_typ <- apply(B_kept, c(1,2), if (agg=="median") median else mean)
-  Sigma_typ <- apply(Sigma_kept, c(1,2), if (agg=="median") median else mean)
-  Sigma_typ <- (Sigma_typ + t(Sigma_typ)) / 2
-  Y_t <- Y_mat[(p_lags+1):nrow(Y_mat), , drop = FALSE]
-  X_t <- do.call(cbind, lapply(1:p_lags, function(l) Y_mat[(p_lags+1-l):(nrow(Y_mat)-l), , drop = FALSE]))
-  X_t <- cbind(1, X_t)
-  U_t <- Y_t - X_t %*% B_typ
-  L_typ <- tryCatch(t(chol(Sigma_typ)),
-                    error = function(e) t(chol(Sigma_typ + diag(1e-10, ncol(Sigma_typ)))))
-  E_t <- t(forwardsolve(L_typ, t(U_t)))  # (T_eff x k), Var ≈ I
-  if (!is.null(dates_vec)) {
-    dates_eff <- as.Date(dates_vec[(p_lags+1):length(dates_vec)])
-  } else {
-    dates_eff <- seq_len(nrow(E_t))
-  }
-  list(E = E_t,
-       e1_dt = data.table(date = dates_eff, e1 = as.numeric(E_t[,1])))
+# ----------------------- Plot GIRF-PD (Koop) ----------------------- #
+plot_girf_pd_single_OIRF <- function(bands_df,
+                                     title_txt = "GIRF de la PD (Koop, choc OIRF)") {
+  p_sel <- unique(bands_df$p); rho_sel <- unique(bands_df$rho)
+  ggplot(bands_df, aes(x = horizon, y = median)) +
+    geom_ribbon(aes(ymin = lower90, ymax = upper90), alpha = 0.30) +
+    geom_ribbon(aes(ymin = lower68, ymax = upper68), alpha = 0.55) +
+    geom_line(linewidth = 1.05) +
+    geom_hline(yintercept = 0) +
+    labs(x = "Horizon (quarters)", y = "Δ PD (pts de prob.)", title = title_txt,
+         subtitle = paste0("p = ", round(p_sel*100, 3), "% ; ρ = ", signif(rho_sel, 4))) +
+    theme(strip.text = element_text(face = "bold"),
+          axis.title = element_text(face = "bold"))
+}
+print(plot_girf_pd_single_OIRF(girf_pd_single_OIRF$bands))
+
+# ----------------------- Sanity check signe (optionnel) ----------------------- #
+psiZ_med <- inj_oirf$psiZ_bands$median
+dPD_med  <- girf_pd_single_OIRF$bands$median
+if (length(psiZ_med) >= 1 && length(dPD_med) >= 1) {
+  s0 <- sign(psiZ_med[1]); t0 <- sign(dPD_med[1])
+  if (s0 < 0 && t0 <= 0) warning("Incohérence possible: ψ_Z(0)<0 mais ΔPD(0) ≤ 0 (avec ρ>0, PD devrait ↑).")
+  if (s0 > 0 && t0 >= 0) warning("Incohérence possible: ψ_Z(0)>0 mais ΔPD(0) ≥ 0 (avec ρ>0, PD devrait ↓).")
 }
 
-E_out <- compute_structural_innovations(B_kept, Sigma_kept, Y_mat, p_lags, dates_vec = dates, agg = "median")
-E_all <- E_out$E
-e1_dt <- E_out$e1_dt
-fwrite(e1_dt, file.path(out_dir, "e1_series.csv"))
-saveRDS(list(E = E_all, e1_dt = e1_dt), file = file.path(out_dir, "struct_innovations.rds"))
-cat("e1_t -> ", file.path(out_dir, "e1_series.csv"), "
-", sep = "")
 
-# ==================== (Option) Bandes postérieures de e_{1,t} ==================== #
-compute_e1_posterior_bands <- function(B_kept, Sigma_kept, Y_mat, p_lags, dates_vec,
-                                       qs = c(0.16, 0.50, 0.84), jitter = 1e-10) {
-  Y_t <- Y_mat[(p_lags+1):nrow(Y_mat), , drop = FALSE]
-  X_t <- do.call(cbind, lapply(1:p_lags, function(l) Y_mat[(p_lags+1-l):(nrow(Y_mat)-l), , drop = FALSE]))
-  X_t <- cbind(1, X_t)
-  T_eff <- nrow(Y_t); k <- ncol(Y_t); M <- dim(B_kept)[3]
-  e1_draws <- matrix(NA_real_, nrow = T_eff, ncol = M)
-  for (m in 1:M) {
-    U_m <- Y_t - X_t %*% B_kept[,, m]
-    L_m <- tryCatch(t(chol(Sigma_kept[,, m])),
-                    error = function(e) t(chol(Sigma_kept[,, m] + diag(jitter, k))))
-    E_m <- t(forwardsolve(L_m, t(U_m)))
-    e1_draws[, m] <- E_m[, 1]
-  }
-  Q <- t(apply(e1_draws, 1, quantile, probs = qs, na.rm = TRUE))
-  data.table(
-    date = if (!is.null(dates_vec)) as.Date(dates_vec[(p_lags+1):length(dates_vec)]) else seq_len(T_eff),
-    q16 = Q[, 1], q50 = Q[, 2], q84 = Q[, 3]
-  )
-}
 
-# ==================== (NOUVEAU) e1_t pour TOUS les tirages (matrice T_eff x M) ==================== #
-compute_e1_all_draws <- function(B_kept, Sigma_kept, Y_mat, p_lags, dates_vec = NULL, jitter = 1e-10) {
-  Y_t <- Y_mat[(p_lags+1):nrow(Y_mat), , drop = FALSE]
-  X_t <- do.call(cbind, lapply(1:p_lags, function(l) Y_mat[(p_lags+1-l):(nrow(Y_mat)-l), , drop = FALSE]))
-  X_t <- cbind(1, X_t)
-  T_eff <- nrow(Y_t); k <- ncol(Y_t); M <- dim(B_kept)[3]
-  e1_draws <- matrix(NA_real_, nrow = T_eff, ncol = M)
-  for (m in 1:M) {
-    U_m <- Y_t - X_t %*% B_kept[,, m]
-    L_m <- tryCatch(t(chol(Sigma_kept[,, m])),
-                    error = function(e) t(chol(Sigma_kept[,, m] + diag(jitter, k))))
-    E_m <- t(forwardsolve(L_m, t(U_m)))
-    e1_draws[, m] <- E_m[, 1]
-  }
-  dates_eff <- if (!is.null(dates_vec)) as.Date(dates_vec[(p_lags+1):length(dates_vec)]) else seq_len(T_eff)
-  colnames(e1_draws) <- sprintf("draw_%05d", seq_len(ncol(e1_draws)))
-  rownames(e1_draws) <- as.character(dates_eff)
-  list(e1_draws = e1_draws, dates_eff = dates_eff)
-}
+message(sprintf("Tirages stables: %d / %d (%.1f%%).", sum(keep), length(keep), 100*mean(keep)))
 
-# Calcul + sauvegardes (grand fichier, ~ quelques dizaines de Mo)
-all_e1 <- compute_e1_all_draws(B_kept, Sigma_kept, Y_mat, p_lags, dates)
-e1_draws_mat <- all_e1$e1_draws
-saveRDS(list(e1_draws = e1_draws_mat, dates = all_e1$dates_eff),
-        file = file.path(out_dir, "e1_draws_all.rds"), compress = "xz")
 
-# Export "wide" (1 ligne = date, 10k colonnes = tirages)
-DT_e1_wide <- as.data.table(e1_draws_mat)
-DT_e1_wide[, date := all_e1$dates_eff]
-setcolorder(DT_e1_wide, c("date", setdiff(colnames(DT_e1_wide), "date")))
-fwrite(DT_e1_wide, file.path(out_dir, "e1_draws_all_wide.csv.gz"))
-
-# Export "long" (optionnel) : 1.2M+ lignes si 120 dates x 10k tirages
-# DT_e1_long <- melt(DT_e1_wide, id.vars = "date", variable.name = "draw", value.name = "e1")
-# fwrite(DT_e1_long, file.path(out_dir, "e1_draws_all_long.csv.gz"))
 
 
 
@@ -676,16 +661,3 @@ cat("\n==> FICHIERS ÉCRITS pour les graphes :\n",
     "- VAR : ", var_dir, "\n",
     "- Z   : ", z_dir,  "\n",
     "- PD  : ", pd_dir,  "\n")
-
-
-# Colonnes de tirages
-draw_cols <- grep("^draw_", names(DT_e1_wide), value = TRUE)
-
-# Médiane par date (ligne) sur les tirages
-e1_median_by_date <- DT_e1_wide[, .(
-  median_e1 = rowMedians(as.matrix(.SD), na.rm = TRUE)
-), .SDcols = draw_cols]
-e1_median_by_date[, date := DT_e1_wide$date]
-setcolorder(e1_median_by_date, c("date", "median_e1"))
-
-fwrite(e1_median_by_date, "output/e1_median.csv")

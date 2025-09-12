@@ -21,14 +21,12 @@ set.seed(123)  # reproductibilité globale
 # ----------------------- PARAMÈTRES GÉNÉRAUX ----------------------- #
 data_var_path   <- "data/processed/data_var_for_model.csv"
 best_model_path <- "scripts/model/best_model.rds"   # produit par ton pipeline Z existant
-out_dir         <- "output_scenario"
+out_dir         <- "output/scenario/"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 dt_e1_median <- fread("output/e1_median.csv")
 
 # Variables du VAR (ordre fixé, GPR en premier pour identification récursive)
-allowed_vect <- c("vix","log_sp500_real","log_oil_real","log_hours_pc",
-                  "log_gdp_pc","nfci")
-
+allowed_vect <- c("log_inv_pc","log_gdp_pc","log_hours_pc","log_oil_real","infl_yoy_pct")
 
 i_var_str <- c("log_GPRD",allowed_vect)
 
