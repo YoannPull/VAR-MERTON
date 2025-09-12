@@ -28,7 +28,7 @@ P_VALUE_THRESHOLD      <- 0.05      # Seuil de significativité pour les variabl
 NB_LAGS                <- 4         # Lags 0..NB_LAGS
 MAX_VARIABLES_IN_MODEL <- 4         # Nombre max de prédicteurs par modèle
 constraint_sign        <- FALSE
-center_data            <- TRUE
+center_data            <- FALSE
 
 set.seed(12345)
 
@@ -79,7 +79,8 @@ if (center_data){
 cat("Correction de l'alignement des dates macroéconomiques effectuée.\n")
 
 # Ensemble des variables macro testées
-vars_to_lag <- c("log_inv_pc","log_gdp_pc","log_hours_pc","log_oil_real","infl_yoy_pct")
+vars_to_lag <- c("vix","log_sp500_real","log_oil_real","log_hours_pc",
+                 "log_gdp_pc")
 
 lag_indices <- 0:NB_LAGS
 lagged_vars_list <- lapply(vars_to_lag, function(var_name) {
