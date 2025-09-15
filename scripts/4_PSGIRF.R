@@ -27,7 +27,7 @@ i_var_str <- c("log_GPRD",allowed_vect)
 
 # Paramètres VAR + IRF
 p_lags     <- 2        # ordre VAR
-nrep       <- 10000    # nb de tirages postérieurs (B, Σ)
+nrep       <- 20000    # nb de tirages postérieurs (B, Σ)
 seed       <- 123
 h          <- 12       # horizons (0..h)
 impulse_ix <- 1        # choc sur GPR (1ère variable)

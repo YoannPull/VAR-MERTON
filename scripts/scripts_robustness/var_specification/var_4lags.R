@@ -59,7 +59,7 @@ out_img_dir <- file.path(out_dir, "IRF_ALL")
 dir.create(out_img_dir, showWarnings = FALSE, recursive = TRUE)
 
 # Paramètres VAR + IRF
-p_lags       <- 2           # ordre VAR
+p_lags       <- 4           # ordre VAR
 nrep_draws   <- 20000       # nb de tirages postérieurs B|Sigma ~ MNIW
 h            <- 12          # horizons IRF (0..h)
 impulse_ix   <- 1           # choc sur la 1ère variable (log_GPRD)
@@ -71,18 +71,19 @@ M_target     <- 20000L      # nombre max de tirages stables conservés
 # ----------------------- SPÉCIFICATIONS TESTÉES ----------------------- #
 # IMPORTANT : 'log_GPRD' est toujours en 1er dans le VAR
 spec_list <- list(
-  S1_main      = c("vix","log_sp500_real","log_oil_real","log_hours_pc","log_gdp_pc","nfci"),
-  S2_appendix  = c("vix","log_sp500_real","gs2","log_inv_pc","log_gdp_pc","log_hours_pc"),
-  S3           = c("vix","log_sp500_real","log_oil_real","log_inv_pc","log_gdp_pc","log_hours_pc"),
-  S4           = c("vix","log_sp500_real","t10Y2Y","t10Y3M","log_gdp_pc","log_hours_pc"),
-  S5           = c("vix","nfci","epu","log_sp500_real","gs2","log_gdp_pc"),
-  S6           = c("log_inv_pc","log_gdp_pc","log_hours_pc","log_oil_real","infl_yoy_pct"),
-  S7           = c("vix","log_sp500_real","gs2","t10Y3M","nfci","epu"),
-  S8           = c("gdp_yoy_pct","infl_annualized_pct","log_oil_real","vix","log_sp500_real"),
-  S9           = c("vix","log_sp500_real","log_oil_real","log_gdp_pc"),
-  S10          = c("t10Y2Y","gs2","log_gdp_pc","log_hours_pc","log_sp500_real")
+  S1_baseline_mkts     = c("vix","log_sp500_real","gs2"),
+  S2_real_block        = c("log_gdp_pc","log_inv_pc","log_hours_pc"),
+  S3_oil_infl_activity = c("log_oil_real","infl_yoy_pct","log_gdp_pc"),
+  S4_term_structure    = c("t10Y3M","gs2","t10Y2Y"),
+  S5_fin_cond          = c("nfci","vix","gs2"),
+  S6_uncertainty_eq    = c("epu","vix","log_sp500_real"),
+  S7_macro_mkts_min    = c("log_gdp_pc","vix","log_sp500_real"),
+  S8_growth_infl_rate  = c("gdp_yoy_pct","infl_annualized_pct","gs2"),
+  S9_oil_stress        = c("log_oil_real","nfci","gs2"),
+  S10_macro_term_mkts  = c("log_gdp_pc","t10Y3M","vix"),
+  S11_invest_fin       = c("log_inv_pc","nfci","gs2"),
+  S12_hours_infl_risk  = c("log_hours_pc","infl_yoy_pct","vix")
 )
-
 # Traçabilité : table des specs testées
 spec_tbl <- data.table(
   spec = names(spec_list),
