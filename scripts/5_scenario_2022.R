@@ -544,6 +544,7 @@ compute_girf_pd_single <- function(psiZ_draws, mu_draws, s2_draws, s2_delta_draw
     s_h       <- sqrt( (1 - rho) + rho * s2_draws[, m] )
     s_h_delta <- sqrt( (1 - rho) + rho * s2_delta_draws[, m] )
     pd_base  <- pnorm( (qpi - sqrt(rho) * mu_base ) / s_h )
+    # pd_base <- p
     pd_delta <- pnorm( (qpi - sqrt(rho) * mu_delta) / s_h_delta )
     pd_diff_draws[, m] <- pd_delta - pd_base
   }
