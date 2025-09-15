@@ -53,6 +53,7 @@ f_Z_estimation <- function(vect_TD) {
 data_risk_all <- read.csv("data/processed/data_risk_EBA.csv", header = TRUE, sep = ";")
 data_risk_usa <- data_risk_all %>% filter(Country == "United States")
 Z_result_usa <- f_Z_estimation(data_risk_usa$Corpo_DR_WA)
+Z_result_usa$Z <- Z_result_usa$Z - mean(Z_result_usa$Z)
 dates_risk <- as.Date(data_risk_usa$Date, format = "%d/%m/%Y")
 Y_df <- data.frame(Date = dates_risk, Y = Z_result_usa$Z)
 

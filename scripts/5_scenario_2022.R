@@ -39,7 +39,7 @@ h          <- 12       # horizons (0..h)
 impulse_ix <- 1        # choc sur GPR (1ère variable)
 chol_jitter <- 1e-10   # robustesse Cholesky
 # shock_scale <- max(dt_e1_median$median_e1)
-shock_scale <- 100
+shock_scale <- 1
 
 # (Optionnel) standardiser Z sur l'échelle du training pour éviter saturation PD
 scale_Z <- FALSE  # passe à TRUE si besoin
