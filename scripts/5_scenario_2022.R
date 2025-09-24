@@ -26,8 +26,8 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 dt_e1_median <- fread("output/e1_median.csv")
 
 # Variables du VAR (ordre fixé, GPR en premier pour identification récursive)
-allowed_vect <-  c("vix","log_sp500_real","log_oil_real",
-                   "log_hours_pc","log_gdp_pc","nfci")
+allowed_vect <-  c("vix","log_sp500_real","log_oil_real","log_hours_pc",
+                   "log_gdp_pc")
 
 i_var_str <- c("log_GPRD",allowed_vect)
 
@@ -38,8 +38,8 @@ seed       <- 123
 h          <- 12       # horizons (0..h)
 impulse_ix <- 1        # choc sur GPR (1ère variable)
 chol_jitter <- 1e-10   # robustesse Cholesky
-# shock_scale <- max(dt_e1_median$median_e1)
-shock_scale <- 1
+shock_scale <- max(dt_e1_median$median_e1)
+# shock_scale <- 1
 
 # (Optionnel) standardiser Z sur l'échelle du training pour éviter saturation PD
 scale_Z <- FALSE  # passe à TRUE si besoin

@@ -101,7 +101,8 @@ if (center_data) {
 cat("Correction de l'alignement des dates macroéconomiques effectuée.\n")
 
 # Ensemble des variables macro testées
-vars_to_lag <- c("t10Y2Y","gs2","log_gdp_pc","log_hours_pc","log_sp500_real")
+vars_to_lag <- c("log_inv_pc","log_gdp_pc","log_hours_pc",
+                 "log_oil_real","infl_yoy_pct")
 
 lag_indices <- 0:NB_LAGS
 lagged_vars_list <- lapply(vars_to_lag, function(var_name) {

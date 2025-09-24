@@ -71,7 +71,7 @@ M_target     <- 20000L      # nombre max de tirages stables conservés
 # ----------------------- SPÉCIFICATIONS TESTÉES ----------------------- #
 # IMPORTANT : 'log_GPRD' est toujours en 1er dans le VAR
 spec_list <- list(
-  S1_main      = c("vix","log_sp500_real","log_oil_real","log_hours_pc","log_gdp_pc","nfci"),
+  S1_main      = c("vix","log_sp500_real","log_oil_real","log_hours_pc","log_gdp_pc"),
   S2_appendix  = c("vix","log_sp500_real","gs2","log_inv_pc","log_gdp_pc","log_hours_pc"),
   S3           = c("vix","log_sp500_real","log_oil_real","log_inv_pc","log_gdp_pc","log_hours_pc"),
   S4           = c("vix","log_sp500_real","t10Y2Y","t10Y3M","log_gdp_pc","log_hours_pc"),
@@ -200,18 +200,30 @@ plot_oirf_panels <- function(bands_df, var_order, impulse_name,
   n_panels <- length(var_order)
   ncol_facets <- min(3L, max(1L, ceiling(n_panels / 2)))
   
-  gg <- ggplot(df, aes(x = horizon)) +
-    geom_hline(yintercept = 0, linewidth = 0.25, color = "grey50") +
-    geom_ribbon(aes(ymin = lower90, ymax = upper90), fill = squaregold, alpha = 0.30) +
-    geom_ribbon(aes(ymin = lower68, ymax = upper68), fill = squaregold, alpha = 0.55) +
-    geom_line(aes(y = median), linewidth = 1.05, color = squareblue) +  # <= courbe bleue
-    facet_wrap(~ variable, scales = "free_y", ncol = ncol_facets) +
-    labs(x = "Horizon (quarters)", y = "Response",
-         title = sprintf("%s — Shock in %s", title_prefix, impulse_name),
-         subtitle = "Median with 68% and 90% credible bands",
-         caption = "BVAR (NIW), OIRF via Cholesky; bands from posterior draws") +
-    theme_square() +
-    (if (use_blank_titles) blank_titles else theme())
+  plot_bands_smart <- function(bands_df, ylab_txt = "Response", y_expand_mult = 0) {
+    p <- ggplot(bands_df, aes(x = horizon, y = median)) +
+      geom_ribbon(aes(ymin = lower90, ymax = upper90), fill = squaregold, alpha = 0.30) +
+      geom_ribbon(aes(ymin = lower68, ymax = upper68), fill = squaregold, alpha = 0.55) +
+      geom_line(linewidth = 1.05, color = squareblue) +
+      geom_hline(yintercept = 0, linewidth = 0.25, color = "grey50") +
+      scale_y_continuous(expand = expansion(mult = c(y_expand_mult, y_expand_mult))) +
+      # >>> force des ticks entiers sur l’axe des x
+      scale_x_continuous(
+        breaks = function(x) seq(max(1, ceiling(x[1])), floor(x[2]), by = 1),
+        minor_breaks = NULL
+        # optionnel : pour démarrer à 1 exactement
+        #, limits = c(1, NA)
+      ) +
+      labs(x = "Horizon (quarters)", y = ylab_txt) +
+      theme_square() + blank_titles
+    
+    if ("variable" %in% names(bands_df) && length(unique(bands_df$variable)) > 1) {
+      p <- p + facet_wrap(~ variable, scales = "free_y")
+    }
+    p
+  }
+  
+  gg <- plot_bands_smart(df, ylab_txt = "Response", y_expand_mult = 0.05)
   
   ggsave(out_path_png, gg, width = 12, height = 8, dpi = 300)
   if (!is.null(out_path_pdf)) ggsave(out_path_pdf, gg, width = 12, height = 8)

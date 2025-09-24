@@ -177,6 +177,13 @@ plot_bands_smart <- function(bands_df, ylab_txt = "Response", y_expand_mult = 0)
     geom_line(linewidth = 1.05, color = squareblue) +
     geom_hline(yintercept = 0, linewidth = 0.25, color = "grey50") +
     scale_y_continuous(expand = expansion(mult = c(y_expand_mult, y_expand_mult))) +
+    # >>> force des ticks entiers sur l’axe des x
+    scale_x_continuous(
+      breaks = function(x) seq(max(1, ceiling(x[1])), floor(x[2]), by = 1),
+      minor_breaks = NULL
+      # optionnel : pour démarrer à 1 exactement
+      #, limits = c(1, NA)
+    ) +
     labs(x = "Horizon (quarters)", y = ylab_txt) +
     theme_square() + blank_titles
   

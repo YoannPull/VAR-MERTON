@@ -26,7 +26,8 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 dt_e1_median <- fread("output_robustness/e1_median.csv")
 
 # Variables du VAR (ordre fixé, GPR en premier pour identification récursive)
-allowed_vect <- c("t10Y2Y","gs2","log_gdp_pc","log_hours_pc","log_sp500_real")
+allowed_vect <- c("log_inv_pc","log_gdp_pc","log_hours_pc",
+                  "log_oil_real","infl_yoy_pct")
 i_var_str <- c("log_GPRD",allowed_vect)
 
 # Paramètres VAR + IRF

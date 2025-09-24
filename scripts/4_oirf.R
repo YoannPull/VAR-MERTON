@@ -25,7 +25,9 @@ out_dir         <- "output"
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 # Variables du VAR (ordre fixé, GPR en premier pour identification récursive)
-allowed_vect <- c("log_inv_pc","log_gdp_pc","log_hours_pc","log_oil_real","infl_yoy_pct")
+allowed_vect <- c("vix","log_sp500_real","log_oil_real","log_hours_pc",
+                  "log_gdp_pc")
+
 i_var_str <- c("log_GPRD", allowed_vect)
 
 # Paramètres VAR + IRF
